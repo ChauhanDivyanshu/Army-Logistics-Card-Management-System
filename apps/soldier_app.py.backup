@@ -1,0 +1,1500 @@
+# apps/soldier_app.py
+# Soldier Card Management App
+# Database + MIFARE Card Integration
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import sys
+import os
+import time
+from tkinter import simpledialog as tk_simpledialog
+import tkinter.simpledialog
+
+
+# Add parent folders to path
+BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(BASE, '..'))
+sys.path.append(os.path.join(BASE, '..', 'database'))
+sys.path.append(os.path.join(BASE, '..', 'shared'))
+
+from db_helper import DatabaseHelper
+from theme import COLORS, FONTS
+from mifare_core import MifareCore
+from trip_card import TripCard
+
+
+
+# ═══════════════════════════════════════════════════════════
+#  SOLDIER CARD - Simple data model
+# ═══════════════════════════════════════════════════════════
+
+class SoldierCard:
+    """
+    Soldier card memory layout:
+    ┌─────────┬──────────────────────────────────────────────┐
+    │ Block 4 │ Soldier ID (16 bytes)                        │
+    │ Block 5 │ Card Type "SOLDIER" (16 bytes)               │
+    └─────────┴──────────────────────────────────────────────┘
+    
+    Baki sab info DATABASE se aati hai via Soldier ID lookup:
+      - Soldier Name
+      - Conductor Name + ID
+      - Unit Name
+      - Required Cargo (items list)
+    """
+
+    def __init__(self):
+        self.soldier_id = ""
+        self.card_type  = "SOLDIER"
+
+    def write(self, core):
+        if not core.authenticate(1):
+            raise Exception("Auth failed - Sector 1")
+        core.write_block(4, core.encode(self.soldier_id, 16))
+        core.write_block(5, core.encode(self.card_type, 16))
+        return True
+
+    def read(self, core):
+        if not core.authenticate(1):
+            raise Exception("Auth failed - Sector 1")
+        b4 = core.read_block(4)
+        if b4:
+            self.soldier_id = core.decode(b4)
+        b5 = core.read_block(5)
+        if b5:
+            self.card_type = core.decode(b5)
+
+
+# ═══════════════════════════════════════════════════════════
+#  MAIN APP
+# ═══════════════════════════════════════════════════════════
+
+class SoldierApp:
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Soldier Card Management — Army Logistics")
+        self.root.configure(bg=COLORS["bg"])
+        self.root.geometry("1400x800")
+        self.root.minsize(1200, 700)
+        try:
+            self.root.state("zoomed")
+        except Exception:
+            pass
+
+        # Initialize
+        self.db = DatabaseHelper()
+        self.mifare = MifareCore(self._log)
+        self.selected_soldier = None
+        self.card_present = False
+
+        # Test DB connection
+        success, msg = self.db.test_connection()
+        if not success:
+            messagebox.showerror(
+                "Database Error",
+                f"Cannot connect to database!\n\n{msg}"
+            )
+            self.root.destroy()
+            return
+
+        self._setup_styles()
+        self._build_ui()
+        self._load_soldiers()
+
+        # Start card polling
+        self.mifare.find_reader()
+        self._poll_card()
+
+    def _setup_styles(self):
+        s = ttk.Style()
+        s.theme_use("clam")
+        s.configure(
+            "Custom.Treeview",
+            background=COLORS["white"],
+            foreground=COLORS["text"],
+            rowheight=30,
+            fieldbackground=COLORS["white"],
+            font=FONTS["body"],
+            borderwidth=0
+        )
+        s.configure(
+            "Custom.Treeview.Heading",
+            background=COLORS["primary"],
+            foreground="white",
+            font=FONTS["title"]
+        )
+        s.map("Custom.Treeview",
+              background=[("selected", COLORS["secondary"])],
+              foreground=[("selected", "white")])
+
+        # Cargo treeview (smaller)
+        s.configure(
+            "Cargo.Treeview",
+            background=COLORS["white"],
+            foreground=COLORS["text"],
+            rowheight=26,
+            fieldbackground=COLORS["white"],
+            font=("Segoe UI", 8),
+            borderwidth=0
+        )
+        s.configure(
+            "Cargo.Treeview.Heading",
+            background=COLORS["info"],
+            foreground="white",
+            font=("Segoe UI", 8, "bold")
+        )
+
+    # ═══════════════════════════════════════════════════════
+    # UI BUILD
+    # ═══════════════════════════════════════════════════════
+
+    def _build_ui(self):
+        self._build_header()
+        self._build_status_bars()
+
+        main = tk.Frame(self.root, bg=COLORS["bg"])
+        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+
+        self._build_soldier_list(main)
+        self._build_form_panel(main)
+        self._build_card_panel(main)
+
+        self._build_footer()
+
+    def _build_header(self):
+        hdr = tk.Frame(self.root, bg=COLORS["primary"], height=60)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+
+        left = tk.Frame(hdr, bg=COLORS["primary"])
+        left.pack(side=tk.LEFT, padx=16, pady=8)
+
+        tk.Label(left, text="🪖",
+                 font=("Segoe UI Emoji", 24),
+                 bg=COLORS["primary"],
+                 fg=COLORS["accent"]).pack(side=tk.LEFT, padx=(0, 10))
+
+        tb = tk.Frame(left, bg=COLORS["primary"])
+        tb.pack(side=tk.LEFT)
+        tk.Label(tb, text="SOLDIER CARD MANAGEMENT",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=COLORS["primary"], fg="white").pack(anchor="w")
+        tk.Label(tb,
+                 text="Database + MIFARE Card  •  Personnel & Cargo",
+                 font=("Segoe UI", 8),
+                 bg=COLORS["primary"], fg="#C8E6C9").pack(anchor="w")
+
+        tk.Label(hdr, text="v1.0",
+                 font=("Segoe UI", 8, "bold"),
+                 bg=COLORS["primary"],
+                 fg="#C8E6C9").pack(side=tk.RIGHT, padx=18)
+
+    def _build_status_bars(self):
+        # DB Status
+        self.db_status = tk.Frame(
+            self.root, bg=COLORS["success"], height=26
+        )
+        self.db_status.pack(fill=tk.X)
+        self.db_status.pack_propagate(False)
+
+        tk.Label(self.db_status, text="🗄  Database: Connected",
+                 font=("Segoe UI", 9, "bold"),
+                 bg=COLORS["success"], fg="white").pack(
+                     side=tk.LEFT, padx=14)
+
+        self.count_var = tk.StringVar(value="Total: 0 soldiers")
+        tk.Label(self.db_status, textvariable=self.count_var,
+                 font=("Segoe UI", 9),
+                 bg=COLORS["success"], fg="white").pack(
+                     side=tk.RIGHT, padx=14)
+
+        # Card Status
+        self.card_status = tk.Frame(
+            self.root, bg=COLORS["danger"], height=26
+        )
+        self.card_status.pack(fill=tk.X)
+        self.card_status.pack_propagate(False)
+
+        self.card_dot = tk.Label(
+            self.card_status, text="●",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLORS["danger"], fg="white"
+        )
+        self.card_dot.pack(side=tk.LEFT, padx=(14, 6))
+
+        self.card_var = tk.StringVar(
+            value="No Card Detected — Place card on reader"
+        )
+        self.card_lbl = tk.Label(
+            self.card_status, textvariable=self.card_var,
+            font=("Segoe UI", 9, "bold"),
+            bg=COLORS["danger"], fg="white"
+        )
+        self.card_lbl.pack(side=tk.LEFT)
+
+        self.atr_var = tk.StringVar(value="ATR: --")
+        self.atr_lbl = tk.Label(
+            self.card_status, textvariable=self.atr_var,
+            font=("Consolas", 8),
+            bg=COLORS["danger"], fg="white"
+        )
+        self.atr_lbl.pack(side=tk.RIGHT, padx=14)
+
+    # ── Left Panel: Soldier List ──────────────────────────
+
+    def _build_soldier_list(self, parent):
+        left_frame = tk.LabelFrame(
+            parent,
+            text="  👥  ALL SOLDIERS (Database)  ",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg"], fg=COLORS["primary"],
+            bd=1, relief=tk.GROOVE
+        )
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH,
+                        expand=True, padx=(0, 5))
+
+        # Search
+        search_frame = tk.Frame(left_frame, bg=COLORS["bg"])
+        search_frame.pack(fill=tk.X, padx=8, pady=8)
+
+        tk.Label(search_frame, text="🔍",
+                 font=("Segoe UI", 11),
+                 bg=COLORS["bg"]).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.search_var = tk.StringVar()
+        self.search_var.trace("w", lambda *a: self._filter_soldiers())
+        tk.Entry(search_frame, textvariable=self.search_var,
+                 font=("Segoe UI", 10), relief=tk.SOLID,
+                 bd=1, highlightbackground=COLORS["border"],
+                 highlightthickness=1).pack(
+                     side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Table
+        tree_frame = tk.Frame(left_frame, bg=COLORS["white"])
+        tree_frame.pack(fill=tk.BOTH, expand=True,
+                        padx=8, pady=(0, 8))
+
+        cols = ("id", "name", "conductor", "unit", "status")
+        self.tree = ttk.Treeview(
+            tree_frame, columns=cols,
+            show="headings", style="Custom.Treeview"
+        )
+
+        self.tree.heading("id",        text="Soldier ID")
+        self.tree.heading("name",      text="Name")
+        self.tree.heading("conductor", text="Conductor")
+        self.tree.heading("unit",      text="Unit")
+        self.tree.heading("status",    text="Status")
+
+        self.tree.column("id",        width=100, anchor="w")
+        self.tree.column("name",      width=140, anchor="w")
+        self.tree.column("conductor", width=140, anchor="w")
+        self.tree.column("unit",      width=100, anchor="w")
+        self.tree.column("status",    width=80,  anchor="center")
+
+        sb = ttk.Scrollbar(tree_frame, orient="vertical",
+                            command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+        self.tree.tag_configure("odd", background=COLORS["white"])
+        self.tree.tag_configure("even", background=COLORS["row_alt"])
+
+        # Cargo requirements (below soldier list)
+        cargo_box = tk.LabelFrame(
+            left_frame,
+            text="  📋  SELECTED SOLDIER'S CARGO  ",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLORS["bg"], fg=COLORS["info"],
+            bd=1, relief=tk.GROOVE
+        )
+        cargo_box.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        cargo_inner = tk.Frame(cargo_box, bg=COLORS["white"])
+        cargo_inner.pack(fill=tk.X, padx=4, pady=4)
+
+        cargo_cols = ("item", "qty", "warehouse", "status")
+        self.cargo_tree = ttk.Treeview(
+            cargo_inner, columns=cargo_cols,
+            show="headings", style="Cargo.Treeview",
+            height=4
+        )
+
+        self.cargo_tree.heading("item",      text="Item")
+        self.cargo_tree.heading("qty",       text="Qty")
+        self.cargo_tree.heading("warehouse", text="Warehouse")
+        self.cargo_tree.heading("status",    text="Status")
+
+        self.cargo_tree.column("item",      width=100, anchor="w")
+        self.cargo_tree.column("qty",       width=50,  anchor="center")
+        self.cargo_tree.column("warehouse", width=100, anchor="center")
+        self.cargo_tree.column("status",    width=90,  anchor="center")
+
+        self.cargo_tree.pack(fill=tk.X)
+
+    # ── Middle Panel: Form ────────────────────────────────
+
+        # ── Middle Panel: Form (SCROLLABLE) ───────────────────
+
+    def _build_form_panel(self, parent):
+        # Outer container with fixed width
+        mid_container = tk.Frame(parent, bg=COLORS["bg"], width=380)
+        mid_container.pack(side=tk.LEFT, fill=tk.BOTH, padx=5)
+        mid_container.pack_propagate(False)
+
+        # Canvas + Scrollbar for scrolling
+        canvas = tk.Canvas(mid_container, bg=COLORS["bg"],
+                           highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(mid_container, orient="vertical",
+                                   command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Inner scrollable frame
+        mid_frame = tk.Frame(canvas, bg=COLORS["bg"])
+        canvas_window = canvas.create_window(
+            (0, 0), window=mid_frame, anchor="nw"
+        )
+
+        # Update scroll region when content changes
+        def _on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        mid_frame.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # ═══ Soldier Form ═══
+        form_box = tk.LabelFrame(
+            mid_frame,
+            text="  ➕  SOLDIER DETAILS  ",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg"], fg=COLORS["primary"],
+            bd=1, relief=tk.GROOVE
+        )
+        form_box.pack(fill=tk.X, pady=(0, 6))
+
+        form_inner = tk.Frame(form_box, bg=COLORS["white"])
+        form_inner.pack(fill=tk.X, padx=4, pady=4)
+        form_inner.columnconfigure(1, weight=1)
+
+        self.fields = {}
+        self._add_field(form_inner, 0, "Soldier ID:", "soldier_id")
+        self._add_field(form_inner, 1, "Soldier Name:", "soldier_name")
+        self._add_field(form_inner, 2, "Conductor ID:", "conductor_id")
+        self._add_field(form_inner, 3, "Conductor Name:", "conductor_name")
+        self._add_field(form_inner, 4, "Unit Name:", "unit_name")
+
+        # ═══ Database Actions ═══
+        db_box = tk.LabelFrame(
+            mid_frame,
+            text="  🗄  DATABASE ACTIONS  ",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg"], fg=COLORS["primary"],
+            bd=1, relief=tk.GROOVE
+        )
+        db_box.pack(fill=tk.X, pady=(0, 6))
+
+        db_inner = tk.Frame(db_box, bg=COLORS["white"])
+        db_inner.pack(fill=tk.X, padx=6, pady=6)
+
+        db_actions = [
+            ("➕  ADD SOLDIER", COLORS["success"], self._add_soldier),
+            ("✏  UPDATE SELECTED", COLORS["info"], self._update_soldier),
+            ("🗑  DELETE SELECTED", COLORS["danger"], self._delete_soldier),
+            ("🔄  REFRESH", COLORS["warning"], self._load_soldiers),
+            ("🧹  CLEAR FORM", COLORS["muted"], self._clear_form),
+        ]
+
+        for text, color, cmd in db_actions:
+            tk.Button(db_inner, text=text, command=cmd,
+                       font=("Segoe UI", 9, "bold"),
+                       bg=color, fg="white",
+                       relief=tk.FLAT, bd=0,
+                       pady=7, cursor="hand2",
+                       activebackground=COLORS["dark"],
+                       activeforeground="white").pack(fill=tk.X, pady=2)
+
+        # ═══ Cargo Requirements Section ═══
+        cargo_box = tk.LabelFrame(
+            mid_frame,
+            text="  📦  ADD CARGO REQUIREMENT  ",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg"], fg=COLORS["info"],
+            bd=1, relief=tk.GROOVE
+        )
+        cargo_box.pack(fill=tk.X, pady=(0, 6))
+
+        cargo_inner = tk.Frame(cargo_box, bg=COLORS["white"])
+        cargo_inner.pack(fill=tk.X, padx=4, pady=4)
+        cargo_inner.columnconfigure(1, weight=1)
+
+        tk.Label(cargo_inner, text="Item Name:",
+                 font=("Segoe UI", 9),
+                 bg=COLORS["white"], fg=COLORS["text"],
+                 anchor="w").grid(row=0, column=0,
+                                   sticky="w", padx=10, pady=4)
+        self.cargo_item_entry = tk.Entry(
+            cargo_inner, font=("Segoe UI", 10),
+            relief=tk.SOLID, bd=1,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1
+        )
+        self.cargo_item_entry.grid(row=0, column=1,
+                                     sticky="ew", padx=10, pady=4)
+
+        tk.Label(cargo_inner, text="Quantity:",
+                 font=("Segoe UI", 9),
+                 bg=COLORS["white"], fg=COLORS["text"],
+                 anchor="w").grid(row=1, column=0,
+                                   sticky="w", padx=10, pady=4)
+        self.cargo_qty_entry = tk.Entry(
+            cargo_inner, font=("Segoe UI", 10),
+            relief=tk.SOLID, bd=1,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1
+        )
+        self.cargo_qty_entry.grid(row=1, column=1,
+                                    sticky="ew", padx=10, pady=4)
+
+        tk.Label(cargo_inner,
+                 text="💡 Select soldier first, then add cargo items",
+                 font=("Segoe UI", 8, "italic"),
+                 bg=COLORS["white"],
+                 fg=COLORS["muted"]).grid(
+                     row=2, column=0, columnspan=2,
+                     sticky="w", padx=10, pady=(4, 4))
+
+        cargo_btn_frame = tk.Frame(cargo_inner, bg=COLORS["white"])
+        cargo_btn_frame.grid(row=3, column=0, columnspan=2,
+                              sticky="ew", padx=6, pady=4)
+
+        tk.Button(cargo_btn_frame, text="➕  ADD CARGO ITEM",
+                   command=self._add_cargo,
+                   font=("Segoe UI", 9, "bold"),
+                   bg=COLORS["info"], fg="white",
+                   relief=tk.FLAT, bd=0, pady=8,
+                   cursor="hand2").pack(fill=tk.X, pady=2)
+
+        tk.Button(cargo_btn_frame, text="🗑  REMOVE SELECTED CARGO",
+                   command=self._remove_cargo,
+                   font=("Segoe UI", 9, "bold"),
+                   bg=COLORS["danger"], fg="white",
+                   relief=tk.FLAT, bd=0, pady=8,
+                   cursor="hand2").pack(fill=tk.X, pady=2)
+
+    def _add_field(self, parent, row, label, key):
+        tk.Label(parent, text=label,
+                 font=("Segoe UI", 9),
+                 bg=COLORS["white"], fg=COLORS["text"],
+                 anchor="w").grid(row=row, column=0,
+                                   sticky="w", padx=10, pady=5)
+
+        entry = tk.Entry(parent, font=("Segoe UI", 10),
+                          relief=tk.SOLID, bd=1,
+                          highlightbackground=COLORS["border"],
+                          highlightthickness=1)
+        entry.grid(row=row, column=1, sticky="ew",
+                   padx=10, pady=5)
+        self.fields[key] = entry
+
+    # ── Right Panel: Card + Log ───────────────────────────
+
+    def _build_card_panel(self, parent):
+        right_frame = tk.Frame(parent, bg=COLORS["bg"], width=380)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0))
+        right_frame.pack_propagate(False)
+
+        # Card Operations
+        card_box = tk.LabelFrame(
+            right_frame,
+            text="  💳  MIFARE CARD OPERATIONS  ",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg"], fg=COLORS["primary"],
+            bd=1, relief=tk.GROOVE
+        )
+        card_box.pack(fill=tk.X, pady=(0, 6))
+
+        card_inner = tk.Frame(card_box, bg=COLORS["white"])
+        card_inner.pack(fill=tk.X, padx=6, pady=6)
+
+        tk.Label(
+            card_inner,
+            text="💡 Card pe sirf Soldier ID write hota hai.\n"
+                 "   Naam, cargo info DB se aati hai.\n"
+                 "   Gate pe scan karke sab details milti hain.",
+            font=("Segoe UI", 8),
+            bg=COLORS["white"], fg=COLORS["muted"],
+            justify="left"
+        ).pack(anchor="w", padx=8, pady=(4, 8))
+
+        card_actions = [
+            ("💾  WRITE SOLDIER ID TO CARD",
+             COLORS["success"], self._write_to_card),
+            ("📖  READ FROM CARD",
+             COLORS["info"], self._read_from_card),
+            ("🔍  VERIFY CARD ↔ DB",
+             COLORS["warning"], self._verify_card_db),
+            # ──── NEW TRIP CARD BUTTONS ────
+            ("🚛  WRITE TRIP CARD",
+             "#7B1FA2", self._write_trip_card),
+            ("📖  READ TRIP CARD",
+             "#1565C0", self._read_trip_card),
+        ]
+
+        for text, color, cmd in card_actions:
+            tk.Button(card_inner, text=text, command=cmd,
+                       font=("Segoe UI", 10, "bold"),
+                       bg=color, fg="white",
+                       relief=tk.FLAT, bd=0,
+                       pady=10, cursor="hand2",
+                       activebackground=COLORS["dark"],
+                       activeforeground="white").pack(
+                           fill=tk.X, pady=3)
+
+        # Activity Log
+        log_box = tk.LabelFrame(
+            right_frame,
+            text="  📋  ACTIVITY LOG  ",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg"], fg=COLORS["primary"],
+            bd=1, relief=tk.GROOVE
+        )
+        log_box.pack(fill=tk.BOTH, expand=True)
+
+        log_inner = tk.Frame(log_box, bg=COLORS["white"])
+        log_inner.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        self.log_text = tk.Text(
+            log_inner, font=("Consolas", 9),
+            bg="#0d1117", fg="#4ade80",
+            relief=tk.FLAT, bd=0, wrap=tk.WORD,
+            insertbackground="white"
+        )
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        sb = ttk.Scrollbar(log_inner, command=self.log_text.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_text.config(yscrollcommand=sb.set)
+
+    def _build_footer(self):
+        footer = tk.Frame(self.root, bg=COLORS["dark"], height=24)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        footer.pack_propagate(False)
+        tk.Label(footer,
+                 text="© 2025 Indian Army  |  Soldier Card Module",
+                 font=("Segoe UI", 8),
+                 bg=COLORS["dark"],
+                 fg=COLORS["muted"]).pack(side=tk.LEFT, padx=12, pady=4)
+        tk.Label(footer,
+                 text="DB: PostgreSQL  |  Card: MIFARE 1K",
+                 font=("Segoe UI", 8),
+                 bg=COLORS["dark"],
+                 fg=COLORS["muted"]).pack(side=tk.RIGHT, padx=12, pady=4)
+
+    # ═══════════════════════════════════════════════════════
+    # LOGGING & STATUS
+    # ═══════════════════════════════════════════════════════
+
+    def _log(self, msg, level="info"):
+        icons = {"info": "ℹ", "ok": "✓", "err": "✗",
+                  "warn": "⚠", "lock": "🔐"}
+        ts = time.strftime("%H:%M:%S")
+        try:
+            self.log_text.insert(
+                tk.END, f"[{ts}] {icons.get(level, '•')} {msg}\n")
+            self.log_text.see(tk.END)
+        except Exception:
+            pass
+
+    def _poll_card(self):
+        present = self.mifare.connect()
+        if present and not self.card_present:
+            atr = self.mifare.get_atr()
+            self.atr_var.set(f"ATR: {atr}")
+            self._set_card_status(
+                "Card Detected — Ready", COLORS["success"])
+            self._log("Card detected on reader", "ok")
+            self.card_present = True
+        elif not present and self.card_present:
+            self.atr_var.set("ATR: --")
+            self._set_card_status(
+                "No Card Detected — Place card on reader",
+                COLORS["danger"])
+            self._log("Card removed", "warn")
+            self.card_present = False
+        self.mifare.disconnect()
+        self.root.after(1500, self._poll_card)
+
+    def _set_card_status(self, text, color):
+        self.card_var.set(text)
+        for w in [self.card_status, self.card_dot,
+                  self.card_lbl, self.atr_lbl]:
+            try:
+                w.configure(bg=color)
+            except Exception:
+                pass
+
+    # ═══════════════════════════════════════════════════════
+    # DATABASE OPERATIONS
+    # ═══════════════════════════════════════════════════════
+
+    def _load_soldiers(self):
+        """Load all soldiers from database."""
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        soldiers = self.db.get_all_soldiers()
+        self.all_soldiers = soldiers
+
+        for i, s in enumerate(soldiers):
+            tag = "even" if i % 2 == 0 else "odd"
+            self.tree.insert(
+                "", tk.END,
+                values=(
+                    s['soldier_id'],
+                    s['soldier_name'],
+                    s.get('conductor_name', '-'),
+                    s.get('unit_name', '-'),
+                    s.get('status', 'ACTIVE')
+                ),
+                tags=(tag,)
+            )
+
+        self.count_var.set(f"Total: {len(soldiers)} soldiers")
+        self._log(f"Loaded {len(soldiers)} soldiers from DB", "ok")
+
+        # Clear cargo tree
+        for item in self.cargo_tree.get_children():
+            self.cargo_tree.delete(item)
+
+    def _filter_soldiers(self):
+        """Filter soldiers by search."""
+        search = self.search_var.get().lower().strip()
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        filtered = [
+            s for s in self.all_soldiers
+            if search in s['soldier_id'].lower()
+            or search in s['soldier_name'].lower()
+            or search in (s.get('conductor_name') or '').lower()
+            or search in (s.get('unit_name') or '').lower()
+        ]
+
+        for i, s in enumerate(filtered):
+            tag = "even" if i % 2 == 0 else "odd"
+            self.tree.insert(
+                "", tk.END,
+                values=(
+                    s['soldier_id'], s['soldier_name'],
+                    s.get('conductor_name', '-'),
+                    s.get('unit_name', '-'),
+                    s.get('status', 'ACTIVE')
+                ),
+                tags=(tag,)
+            )
+
+    def _on_select(self, event):
+        """When soldier row selected, fill form + show cargo."""
+        selection = self.tree.selection()
+        if not selection:
+            return
+
+        values = self.tree.item(selection[0])['values']
+
+        self._clear_form(refresh=False)
+
+        self.fields['soldier_id'].insert(0, values[0])
+        self.fields['soldier_name'].insert(0, values[1])
+
+        if values[2] and values[2] != '-':
+            self.fields['conductor_name'].insert(0, values[2])
+
+        if values[3] and values[3] != '-':
+            self.fields['unit_name'].insert(0, values[3])
+
+        # Get full soldier details for conductor_id
+        soldier = self.db.get_soldier_by_id(values[0])
+        if soldier and soldier.get('conductor_id'):
+            self.fields['conductor_id'].insert(
+                0, soldier['conductor_id']
+            )
+
+        self.selected_soldier = values[0]
+        self.fields['soldier_id'].configure(state="readonly")
+
+        # Load cargo requirements
+        self._load_cargo(values[0])
+
+        self._log(f"Selected: {values[0]} - {values[1]}", "info")
+
+    def _load_cargo(self, soldier_id):
+        """Load cargo requirements for selected soldier."""
+        for item in self.cargo_tree.get_children():
+            self.cargo_tree.delete(item)
+
+        requirements = self.db.get_cargo_requirements_by_soldier(
+            soldier_id
+        )
+
+        for r in requirements:
+            warehouse = r.get('assigned_warehouse') or '-'
+            self.cargo_tree.insert(
+                "", tk.END,
+                values=(
+                    r['item_name'],
+                    r['required_qty'],
+                    warehouse,
+                    r['status']
+                )
+            )
+
+    def _add_soldier(self):
+        """Add new soldier to database."""
+        sid       = self.fields['soldier_id'].get().strip()
+        sname     = self.fields['soldier_name'].get().strip()
+        cid       = self.fields['conductor_id'].get().strip()
+        cname     = self.fields['conductor_name'].get().strip()
+        unit      = self.fields['unit_name'].get().strip()
+
+        # Validation
+        if not sid:
+            messagebox.showwarning("Required",
+                                    "Soldier ID is required!")
+            self.fields['soldier_id'].focus()
+            return
+
+        if not sname:
+            messagebox.showwarning("Required",
+                                    "Soldier Name is required!")
+            return
+
+        # Check duplicate
+        existing = self.db.get_soldier_by_id(sid)
+        if existing:
+            messagebox.showerror(
+                "Duplicate",
+                f"Soldier ID '{sid}' already exists!\n\n"
+                f"Use Update button to modify."
+            )
+            return
+
+        # Insert
+        if self.db.add_soldier(sid, sname, cid, cname, unit):
+            self._log(f"Soldier {sid} added", "ok")
+            messagebox.showinfo(
+                "Success",
+                f"✅ Soldier added to database!\n\n"
+                f"Soldier ID: {sid}\n"
+                f"Name: {sname}\n"
+                f"Conductor: {cname or '-'}\n"
+                f"Unit: {unit or '-'}\n\n"
+                f"💡 Now:\n"
+                f"   1. Add cargo requirements\n"
+                f"   2. Write ID to MIFARE card"
+            )
+            self._clear_form()
+            self._load_soldiers()
+        else:
+            messagebox.showerror(
+                "Error", "Failed to add soldier!"
+            )
+
+    def _update_soldier(self):
+        """Update selected soldier."""
+        if not self.selected_soldier:
+            messagebox.showwarning(
+                "No Selection",
+                "Please select a soldier from the list first!"
+            )
+            return
+
+        sname = self.fields['soldier_name'].get().strip()
+        cid   = self.fields['conductor_id'].get().strip()
+        cname = self.fields['conductor_name'].get().strip()
+        unit  = self.fields['unit_name'].get().strip()
+
+        if not sname:
+            messagebox.showwarning("Required",
+                                    "Soldier Name is required!")
+            return
+
+        if not messagebox.askyesno(
+            "Confirm Update",
+            f"Update soldier '{self.selected_soldier}'?"
+        ):
+            return
+
+        if self.db.update_soldier(
+            self.selected_soldier,
+            soldier_name=sname,
+            conductor_id=cid,
+            conductor_name=cname,
+            unit_name=unit
+        ):
+            self._log(f"Soldier {self.selected_soldier} updated",
+                       "ok")
+            messagebox.showinfo(
+                "Success", "✅ Soldier updated successfully!"
+            )
+            self._clear_form()
+            self._load_soldiers()
+        else:
+            messagebox.showerror(
+                "Error", "Failed to update soldier!"
+            )
+
+    def _delete_soldier(self):
+        """Delete selected soldier."""
+        if not self.selected_soldier:
+            messagebox.showwarning(
+                "No Selection",
+                "Please select a soldier from the list first!"
+            )
+            return
+
+        # Check cargo requirements
+        cargo = self.db.get_cargo_requirements_by_soldier(
+            self.selected_soldier
+        )
+        if cargo:
+            if not messagebox.askyesno(
+                "Has Cargo Requirements",
+                f"⚠️  Soldier has {len(cargo)} cargo "
+                f"requirement(s)!\n\n"
+                f"Deleting soldier will also delete all "
+                f"cargo requirements.\n\n"
+                f"Continue?"
+            ):
+                return
+
+            # Delete all cargo first
+            for c in cargo:
+                self.db.delete_cargo_requirement(c['req_id'])
+
+        if not messagebox.askyesno(
+            "Confirm Delete",
+            f"⚠️  Delete soldier '{self.selected_soldier}'?\n\n"
+            f"This action cannot be undone!"
+        ):
+            return
+
+        if self.db.delete_soldier(self.selected_soldier):
+            self._log(f"Soldier {self.selected_soldier} deleted",
+                       "warn")
+            messagebox.showinfo(
+                "Success", "✅ Soldier deleted successfully!"
+            )
+            self._clear_form()
+            self._load_soldiers()
+        else:
+            messagebox.showerror(
+                "Error", "Failed to delete soldier!"
+            )
+
+    def _clear_form(self, refresh=True):
+        """Clear all form fields."""
+        for key, widget in self.fields.items():
+            try:
+                widget.configure(state="normal")
+                widget.delete(0, tk.END)
+            except Exception:
+                pass
+
+        self.cargo_item_entry.delete(0, tk.END)
+        self.cargo_qty_entry.delete(0, tk.END)
+
+        self.selected_soldier = None
+
+        # Clear tree selection
+        for item in self.tree.selection():
+            self.tree.selection_remove(item)
+
+        # Clear cargo tree
+        for item in self.cargo_tree.get_children():
+            self.cargo_tree.delete(item)
+
+        if refresh:
+            self._log("Form cleared", "info")
+
+    # ═══════════════════════════════════════════════════════
+    # CARGO OPERATIONS
+    # ═══════════════════════════════════════════════════════
+
+    def _add_cargo(self):
+        """Add cargo requirement for selected soldier."""
+        if not self.selected_soldier:
+            messagebox.showwarning(
+                "No Soldier",
+                "Please select a soldier from the list first!"
+            )
+            return
+
+        item = self.cargo_item_entry.get().strip()
+        qty  = self.cargo_qty_entry.get().strip()
+
+        if not item:
+            messagebox.showwarning("Required",
+                                    "Item name is required!")
+            self.cargo_item_entry.focus()
+            return
+
+        try:
+            qty = int(qty) if qty else 0
+        except ValueError:
+            messagebox.showwarning(
+                "Invalid", "Quantity must be a number!"
+            )
+            return
+
+        if qty <= 0:
+            messagebox.showwarning("Invalid",
+                                    "Quantity must be greater than 0!")
+            return
+
+        # Check if item exists in any container
+        containers = self.db.get_containers_by_item(item)
+        if not containers:
+            if not messagebox.askyesno(
+                "Item Not Available",
+                f"Item '{item}' is not in any container!\n\n"
+                f"Soldier won't get auto-assignment at gate.\n\n"
+                f"Continue anyway?"
+            ):
+                return
+
+        if self.db.add_cargo_requirement(
+            self.selected_soldier, item, qty
+        ):
+            self._log(
+                f"Cargo added: {item} × {qty} for "
+                f"{self.selected_soldier}", "ok"
+            )
+
+            self.cargo_item_entry.delete(0, tk.END)
+            self.cargo_qty_entry.delete(0, tk.END)
+
+            # Reload cargo list
+            self._load_cargo(self.selected_soldier)
+
+            messagebox.showinfo(
+                "Success",
+                f"✅ Cargo requirement added!\n\n"
+                f"Soldier: {self.selected_soldier}\n"
+                f"Item: {item}\n"
+                f"Quantity: {qty}\n\n"
+                f"Available in {len(containers)} container(s)"
+            )
+        else:
+            messagebox.showerror(
+                "Error", "Failed to add cargo!"
+            )
+
+    def _remove_cargo(self):
+        """Remove selected cargo requirement."""
+        selection = self.cargo_tree.selection()
+        if not selection:
+            messagebox.showwarning(
+                "No Selection",
+                "Please select a cargo item to remove!"
+            )
+            return
+
+        values = self.cargo_tree.item(selection[0])['values']
+        item = values[0]
+
+        if not messagebox.askyesno(
+            "Confirm Remove",
+            f"Remove cargo: {item} × {values[1]}?"
+        ):
+            return
+
+        # Find req_id from database
+        requirements = self.db.get_cargo_requirements_by_soldier(
+            self.selected_soldier
+        )
+
+        for r in requirements:
+            if (r['item_name'] == item
+                    and str(r['required_qty']) == str(values[1])):
+                if self.db.delete_cargo_requirement(r['req_id']):
+                    self._log(f"Cargo removed: {item}", "warn")
+                    self._load_cargo(self.selected_soldier)
+                    messagebox.showinfo(
+                        "Success", "✅ Cargo removed!"
+                    )
+                    return
+
+        messagebox.showerror("Error", "Failed to remove cargo!")
+
+    # ═══════════════════════════════════════════════════════
+    # MIFARE CARD OPERATIONS
+    # ═══════════════════════════════════════════════════════
+
+    def _write_to_card(self):
+        """Write Soldier ID to MIFARE card."""
+        sid = self.fields['soldier_id'].get().strip()
+
+        if not sid:
+            messagebox.showwarning(
+                "Required",
+                "Please enter or select a Soldier ID first!"
+            )
+            return
+
+        # Verify soldier exists
+        soldier = self.db.get_soldier_by_id(sid)
+        if not soldier:
+            if not messagebox.askyesno(
+                "Not in Database",
+                f"Soldier '{sid}' is not in database!\n\n"
+                f"Do you still want to write it to card?"
+            ):
+                return
+
+        if not self.mifare.connect():
+            messagebox.showerror(
+                "No Card", "Place MIFARE card on reader!"
+            )
+            return
+
+        try:
+            self._log("═" * 36)
+            self._log(f"WRITING Soldier ID to card: {sid}", "info")
+
+            card = SoldierCard()
+            card.soldier_id = sid
+            card.write(self.mifare)
+
+            self._log(f"✅ Card programmed with ID: {sid}", "ok")
+
+            info = f"✅ Card programmed successfully!\n\n"
+            info += f"Soldier ID: {sid}\n"
+            info += f"Card Type: SOLDIER\n\n"
+
+            if soldier:
+                cargo = self.db.get_cargo_requirements_by_soldier(sid)
+                info += f"🪖 Soldier Details (from DB):\n"
+                info += f"  Name:      {soldier['soldier_name']}\n"
+                info += f"  Conductor: "
+                info += f"{soldier.get('conductor_name', '-')}\n"
+                info += f"  Unit:      "
+                info += f"{soldier.get('unit_name', '-')}\n"
+                info += f"  Cargo:     {len(cargo)} item(s)"
+
+            messagebox.showinfo("Success", info)
+
+        except Exception as e:
+            self._log(f"Write error: {e}", "err")
+            messagebox.showerror("Write Error", str(e))
+        finally:
+            self.mifare.disconnect()
+
+    def _read_from_card(self):
+        """Read Soldier ID from card and load full profile."""
+        if not self.mifare.connect():
+            messagebox.showerror(
+                "No Card", "Place MIFARE card on reader!"
+            )
+            return
+
+        try:
+            self._log("═" * 36)
+            self._log("READING soldier card...", "info")
+
+            card = SoldierCard()
+            card.read(self.mifare)
+
+            if not card.soldier_id:
+                messagebox.showwarning(
+                    "Empty Card",
+                    "This card has no Soldier ID written on it!"
+                )
+                return
+
+            self._log(f"Card Soldier ID: {card.soldier_id}", "ok")
+
+            soldier = self.db.get_soldier_by_id(card.soldier_id)
+
+            if soldier:
+                self._log("✅ Soldier found in database", "ok")
+
+                # Auto-fill form
+                self._clear_form(refresh=False)
+                self.fields['soldier_id'].insert(
+                    0, soldier['soldier_id']
+                )
+                self.fields['soldier_name'].insert(
+                    0, soldier['soldier_name']
+                )
+
+                if soldier.get('conductor_id'):
+                    self.fields['conductor_id'].insert(
+                        0, soldier['conductor_id']
+                    )
+                if soldier.get('conductor_name'):
+                    self.fields['conductor_name'].insert(
+                        0, soldier['conductor_name']
+                    )
+                if soldier.get('unit_name'):
+                    self.fields['unit_name'].insert(
+                        0, soldier['unit_name']
+                    )
+
+                self.selected_soldier = soldier['soldier_id']
+                self.fields['soldier_id'].configure(state="readonly")
+
+                # Load cargo
+                self._load_cargo(soldier['soldier_id'])
+
+                # Show details popup
+                self._show_soldier_details(soldier)
+
+            else:
+                self._log(
+                    f"⚠ Soldier '{card.soldier_id}' not in DB",
+                    "warn"
+                )
+                messagebox.showwarning(
+                    "Not Found",
+                    f"Card Soldier ID: {card.soldier_id}\n\n"
+                    f"❌ Not found in database!"
+                )
+
+        except Exception as e:
+            self._log(f"Read error: {e}", "err")
+            messagebox.showerror("Read Error", str(e))
+        finally:
+            self.mifare.disconnect()
+
+    def _verify_card_db(self):
+        """Verify card matches database."""
+        if not self.mifare.connect():
+            messagebox.showerror(
+                "No Card", "Place card on reader!"
+            )
+            return
+
+        try:
+            self._log("═" * 36)
+            self._log("VERIFYING soldier card...", "info")
+
+            card = SoldierCard()
+            card.read(self.mifare)
+
+            if not card.soldier_id:
+                messagebox.showwarning(
+                    "Empty Card", "Card has no Soldier ID!"
+                )
+                return
+
+            soldier = self.db.get_soldier_by_id(card.soldier_id)
+
+            if soldier:
+                cargo = self.db.get_cargo_requirements_by_soldier(
+                    card.soldier_id
+                )
+
+                msg = f"✅ VERIFICATION SUCCESSFUL\n\n"
+                msg += f"{'─'*30}\n"
+                msg += f"Card Soldier ID: {card.soldier_id}\n"
+                msg += f"Card Type:       {card.card_type}\n"
+                msg += f"{'─'*30}\n\n"
+                msg += f"🪖 Database Match:\n"
+                msg += f"  Name:      {soldier['soldier_name']}\n"
+                msg += f"  Conductor: "
+                msg += f"{soldier.get('conductor_name', '-')}\n"
+                msg += f"  Unit:      "
+                msg += f"{soldier.get('unit_name', '-')}\n"
+                msg += f"  Cargo:     {len(cargo)} requirement(s)\n\n"
+
+                if cargo:
+                    msg += f"📋 Required Items:\n"
+                    for c in cargo:
+                        msg += f"  • {c['item_name']} × "
+                        msg += f"{c['required_qty']} "
+                        msg += f"[{c['status']}]\n"
+
+                self._log("Card verified successfully", "ok")
+                messagebox.showinfo("Verification OK", msg)
+            else:
+                self._log(
+                    f"Card ID not in DB: {card.soldier_id}", "err"
+                )
+                messagebox.showerror(
+                    "Verification Failed",
+                    f"❌ Card ID '{card.soldier_id}' "
+                    f"NOT found in database!"
+                )
+
+        except Exception as e:
+            self._log(f"Verify error: {e}", "err")
+            messagebox.showerror("Error", str(e))
+        finally:
+            self.mifare.disconnect()
+
+    def _show_soldier_details(self, soldier):
+        """Show detailed popup of soldier info."""
+        popup = tk.Toplevel(self.root)
+        popup.title("Soldier Details (from Database)")
+        popup.configure(bg=COLORS["bg"])
+        popup.geometry("520x600")
+        popup.grab_set()
+
+        # Header
+        hdr = tk.Frame(popup, bg=COLORS["primary"], height=54)
+        hdr.pack(fill=tk.X)
+        hdr.pack_propagate(False)
+        tk.Label(hdr, text="🪖  SOLDIER VERIFIED",
+                 font=("Segoe UI", 13, "bold"),
+                 bg=COLORS["primary"],
+                 fg="white").pack(pady=13)
+
+        # Status banner
+        stat = tk.Frame(popup, bg=COLORS["success"], height=34)
+        stat.pack(fill=tk.X)
+        stat.pack_propagate(False)
+        tk.Label(stat,
+                 text=f"✓  Card ID matches Database Entry",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=COLORS["success"],
+                 fg="white").pack(pady=7)
+
+        # Body
+        body = tk.Frame(popup, bg=COLORS["bg"])
+        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
+
+        def info_block(title, rows):
+            frm = tk.LabelFrame(
+                body, text=f"  {title}",
+                font=("Segoe UI", 9, "bold"),
+                bg=COLORS["white"],
+                fg=COLORS["primary"],
+                bd=1, relief=tk.GROOVE
+            )
+            frm.pack(fill=tk.X, pady=(0, 6))
+            inner = tk.Frame(frm, bg=COLORS["white"])
+            inner.pack(fill=tk.X, padx=8, pady=6)
+            for lbl, val in rows:
+                row = tk.Frame(inner, bg=COLORS["white"])
+                row.pack(fill=tk.X, pady=2)
+                tk.Label(row, text=f"{lbl}:",
+                         font=("Segoe UI", 9),
+                         bg=COLORS["white"],
+                         fg=COLORS["muted"],
+                         width=15,
+                         anchor="w").pack(side=tk.LEFT)
+                tk.Label(row, text=str(val) if val else "—",
+                         font=("Segoe UI", 9, "bold"),
+                         bg=COLORS["white"],
+                         fg=COLORS["text"]).pack(side=tk.LEFT)
+
+        # Soldier info
+        info_block("🪖  SOLDIER INFORMATION", [
+            ("Soldier ID",   soldier['soldier_id']),
+            ("Soldier Name", soldier['soldier_name']),
+            ("Unit Name",    soldier.get('unit_name', '-')),
+            ("Status",       soldier.get('status', 'ACTIVE')),
+        ])
+
+        # Conductor info
+        info_block("🚗  CONDUCTOR INFORMATION", [
+            ("Conductor ID",   soldier.get('conductor_id', '-')),
+            ("Conductor Name", soldier.get('conductor_name', '-')),
+        ])
+
+        # Cargo requirements
+        cargo = self.db.get_cargo_requirements_by_soldier(
+            soldier['soldier_id']
+        )
+
+        cargo_box = tk.LabelFrame(
+            body,
+            text=f"  📋  REQUIRED CARGO ({len(cargo)} items)  ",
+            font=("Segoe UI", 9, "bold"),
+            bg=COLORS["white"],
+            fg=COLORS["primary"],
+            bd=1, relief=tk.GROOVE
+        )
+        cargo_box.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+
+        cargo_inner = tk.Frame(cargo_box, bg=COLORS["white"])
+        cargo_inner.pack(fill=tk.BOTH, expand=True,
+                          padx=4, pady=4)
+
+        if cargo:
+            cargo_text = tk.Text(
+                cargo_inner, font=("Consolas", 9),
+                bg="#F8FFF8", fg=COLORS["text"],
+                relief=tk.FLAT, height=6
+            )
+            cargo_text.pack(fill=tk.BOTH, expand=True)
+
+            for c in cargo:
+                status_icon = "⏳" if c['status'] == 'PENDING' \
+                    else "✅" if c['status'] == 'ASSIGNED' \
+                    else "✔"
+                cargo_text.insert(
+                    tk.END,
+                    f"  {status_icon}  {c['item_name']:<15} × "
+                    f"{c['required_qty']:<5} [{c['status']}]\n"
+                )
+            cargo_text.configure(state="disabled")
+        else:
+            tk.Label(cargo_inner,
+                     text="No cargo requirements yet",
+                     font=("Segoe UI", 9, "italic"),
+                     bg=COLORS["white"],
+                     fg=COLORS["muted"]).pack(pady=14)
+
+        # Close button
+        tk.Button(body, text="✓  CLOSE",
+                   font=("Segoe UI", 10, "bold"),
+                   bg=COLORS["primary"], fg="white",
+                   relief=tk.FLAT, pady=10,
+                   cursor="hand2",
+                   command=popup.destroy).pack(fill=tk.X, pady=(4, 0))
+        
+    def _write_trip_card(self):
+        """Write TRIP data to MIFARE card."""
+        sid = self.fields['soldier_id'].get().strip()
+        sname = self.fields['soldier_name'].get().strip()
+        cid = self.fields['conductor_id'].get().strip()
+        cname = self.fields['conductor_name'].get().strip()
+        unit = self.fields['unit_name'].get().strip()
+
+        if not sid:
+            messagebox.showwarning("Required", "Soldier/Driver ID required!")
+            return
+
+        # Get cargo items for this soldier
+        cargo = self.db.get_cargo_requirements_by_soldier(sid)
+        if not cargo:
+            messagebox.showwarning("No Cargo",
+                f"No cargo requirements for {sid}!\n"
+                f"Add cargo items first.")
+            return
+
+        if not self.mifare.connect():
+            messagebox.showerror("No Card", "Place MIFARE card on reader!")
+            return
+
+        try:
+            self._log("═" * 36)
+            self._log(f"WRITING TRIP CARD for {sid}", "info")
+
+            # Ask for truck number
+            truck = tk.simpledialog.askstring(
+                "Truck Number",
+                "Enter Truck Number:",
+                initialvalue=unit or "TRK-"
+            )
+            if not truck:
+                return
+
+            trip_id = tk.simpledialog.askstring(
+                "Trip ID",
+                "Enter Trip ID:",
+                initialvalue=f"TRIP-{sid}"
+            )
+
+            card = TripCard()
+            card.truck_number = truck
+            card.driver_id = sid
+            card.driver_name = sname
+            card.subdriver_id = cid
+            card.subdriver_name = cname
+            card.trip_id = trip_id or f"TRIP-{sid}"
+
+            # Add cargo items
+            for c in cargo:
+                card.add_item(c['item_name'], c['required_qty'])
+                self._log(f"  Item: {c['item_name']} × {c['required_qty']}", "info")
+
+            card.write(self.mifare)
+
+            self._log(f"✅ Trip card written! {len(cargo)} items", "ok")
+
+            info = f"✅ TRIP CARD WRITTEN!\n\n"
+            info += f"🚛 Truck: {truck}\n"
+            info += f"👨 Driver: {sname} ({sid})\n"
+            info += f"👤 Sub-driver: {cname} ({cid})\n"
+            info += f"🎫 Trip ID: {card.trip_id}\n\n"
+            info += f"📦 Items ({len(cargo)}):\n"
+            for c in cargo:
+                info += f"   • {c['item_name']} × {c['required_qty']}\n"
+
+            messagebox.showinfo("Success", info)
+
+        except Exception as e:
+            self._log(f"Write error: {e}", "err")
+            messagebox.showerror("Error", str(e))
+        finally:
+            self.mifare.disconnect()
+
+    def _read_trip_card(self):
+        """Read TRIP data from MIFARE card."""
+        if not self.mifare.connect():
+            messagebox.showerror("No Card", "Place card on reader!")
+            return
+
+        try:
+            self._log("═" * 36)
+            self._log("READING trip card...", "info")
+
+            card = TripCard()
+            card.read(self.mifare)
+
+            if not card.is_valid():
+                messagebox.showwarning("Empty", "Card has no trip data!")
+                return
+
+            self._log(f"✓ Truck: {card.truck_number}", "ok")
+            self._log(f"✓ Driver: {card.driver_name}", "ok")
+            self._log(f"✓ Items: {len(card.items)}", "ok")
+
+            info = f"📖 TRIP CARD DATA\n\n"
+            info += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            info += f"🚛 Truck: {card.truck_number}\n"
+            info += f"🎫 Trip ID: {card.trip_id}\n"
+            info += f"👨 Driver: {card.driver_name} ({card.driver_id})\n"
+            info += f"👤 Sub-driver: {card.subdriver_name} ({card.subdriver_id})\n"
+            info += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            info += f"📦 Items ({len(card.items)}):\n"
+            for item in card.items:
+                info += f"   • {item['name']} × {item['qty']}\n"
+
+            messagebox.showinfo("Trip Card", info)
+
+        except Exception as e:
+            self._log(f"Read error: {e}", "err")
+            messagebox.showerror("Error", str(e))
+        finally:
+            self.mifare.disconnect()
+
+
+# ═══════════════════════════════════════════════════════════
+#  ENTRY POINT
+# ═══════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app  = SoldierApp(root)
+    root.mainloop()
+                       

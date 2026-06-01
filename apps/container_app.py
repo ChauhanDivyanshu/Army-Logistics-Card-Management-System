@@ -17,7 +17,6 @@ sys.path.append(os.path.join(BASE, '..', 'shared'))
 
 from db_helper import DatabaseHelper
 from theme import COLORS, FONTS
-from mifare_core import MifareCore
 
 
 # ═══════════════════════════════════════════════════════════
@@ -88,9 +87,7 @@ class ContainerApp:
 
         # Initialize
         self.db = DatabaseHelper()
-        self.mifare = MifareCore(self._log)
         self.selected_container = None
-        self.card_present = False
         self.warehouse_map = {}  # display_name -> warehouse_id
 
         # Test DB connection
@@ -108,10 +105,7 @@ class ContainerApp:
         self._load_warehouses_dropdown()
         self._load_containers()
 
-        # Start card polling
-        self.mifare.find_reader()
-        self._poll_card()
-
+    
     def _setup_styles(self):
         s = ttk.Style()
         s.theme_use("clam")
@@ -308,34 +302,35 @@ class ContainerApp:
         mid_frame.pack_propagate(False)
 
         # Form box
-        form_box = tk.LabelFrame(
-            mid_frame,
-            text="  ➕  CONTAINER DETAILS  ",
+                # ═══ UHF TAG OPERATIONS (replaces MIFARE) ═══
+        uhf_box = tk.LabelFrame(
+            mid_frame,  # or wherever your card section is
+            text="  📡  UHF TAG OPERATIONS  ",
             font=("Segoe UI", 10, "bold"),
-            bg=COLORS["bg"], fg=COLORS["primary"],
+            bg=COLORS["bg"], fg="#7B1FA2",
             bd=1, relief=tk.GROOVE
         )
-        form_box.pack(fill=tk.X, pady=(0, 6))
+        uhf_box.pack(fill=tk.X, pady=(0, 6))
 
-        form_inner = tk.Frame(form_box, bg=COLORS["white"])
-        form_inner.pack(fill=tk.X, padx=4, pady=4)
-        form_inner.columnconfigure(1, weight=1)
+        uhf_inner = tk.Frame(uhf_box, bg=COLORS["white"])
+        uhf_inner.pack(fill=tk.X, padx=6, pady=6)
 
-        self.fields = {}
+        tk.Label(uhf_inner,
+            text="💡 Containers don't have UHF tags themselves.\n"
+                 "   Their boxes have UHF tags with SKU info.\n"
+                 "   Use UHF Writer to manage box tags.",
+            font=("Segoe UI", 8, "italic"),
+            bg=COLORS["white"], fg=COLORS["muted"],
+            justify="left").pack(anchor="w", padx=8, pady=(4, 8))
 
-        # Row 0: SKU-ID
-        self._add_field(form_inner, 0, "SKU-ID:", "sku_id")
-
-        # Row 1: Container Name
-        self._add_field(form_inner, 1,
-                         "Container Name:", "container_name")
-
-        # Row 2: Warehouse dropdown
-        tk.Label(form_inner, text="Warehouse:",
-                 font=("Segoe UI", 9),
-                 bg=COLORS["white"], fg=COLORS["text"],
-                 anchor="w").grid(row=2, column=0,
-                                   sticky="w", padx=10, pady=5)
+        tk.Button(uhf_inner, text="📡  WRITE UHF TAGS (Open UHF Writer)",
+                   command=self._launch_uhf_writer,
+                   font=("Segoe UI", 10, "bold"),
+                   bg="#7B1FA2", fg="white",
+                   relief=tk.FLAT, bd=0,
+                   pady=10, cursor="hand2",
+                   activebackground=COLORS["dark"],
+                   activeforeground="white").pack(fill=tk.X, pady=2)
 
         self.warehouse_combo = ttk.Combobox(
             form_inner, state="readonly",
@@ -1187,6 +1182,45 @@ class ContainerApp:
                    relief=tk.FLAT, pady=10,
                    cursor="hand2",
                    command=popup.destroy).pack(fill=tk.X, pady=(4, 0))
+        
+        
+    def _launch_uhf_writer(self):
+        """Launch UHF Writer App for selected box's container."""
+        # Get selected container from selected box
+        if not self.selected_box:
+            messagebox.showwarning("Select Box",
+                "Please select a box first!")
+            return
+        
+        # Get the SKU/container for this box
+        sku = self.selected_box.get('container_id', 'Unknown')
+        
+        if not messagebox.askyesno("Launch UHF Writer",
+            f"Open UHF Writer App?\n\n"
+            f"Container: {sku}\n"
+            f"Box: {self.selected_box.get('box_uid')}\n\n"
+            f"You can write UHF tags there."):
+            return
+        
+        import subprocess
+        import sys
+        
+        BASE = os.path.dirname(os.path.abspath(__file__))
+        uhf_app = os.path.join(BASE, 'uhf_writer_app.py')
+        
+        if os.path.exists(uhf_app):
+            try:
+                subprocess.Popen([sys.executable, uhf_app])
+                self._log(f"✓ Launched UHF Writer", "ok")
+                messagebox.showinfo("Launched",
+                    f"UHF Writer App opened!\n\n"
+                    f"Select container '{sku}'\n"
+                    f"and write tags for boxes.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to launch: {e}")
+        else:
+            messagebox.showerror("Not Found",
+                f"UHF Writer app not found!")
 
 
 # ═══════════════════════════════════════════════════════════

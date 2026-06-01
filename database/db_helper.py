@@ -893,6 +893,114 @@ class DatabaseHelper:
             print(f"Error: {e}")
             return []
 
+        # ═══════════════════════════════════════════════════════
+    # 🔐 USER AUTHENTICATION (Add these methods)
+    # ═══════════════════════════════════════════════════════
+
+    def authenticate_user(self, username, password_hash):
+        """
+        🔐 Authenticate user with username and hashed password.
+        
+        Returns:
+            dict with user data if successful, None if failed
+        """
+        try:
+            self.connect()
+            cursor = self.connection.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("""
+                SELECT user_id, username, full_name, role, email, phone,
+                       assigned_unit, assigned_warehouse, status,
+                       failed_attempts, last_login
+                FROM users
+                WHERE username = %s
+                  AND password_hash = %s
+                  AND status = 'ACTIVE';
+            """, (username, password_hash))
+            result = cursor.fetchone()
+            cursor.close()
+            self.disconnect()
+            return result
+        except Exception as e:
+            print(f"Error: {e}")
+            return None
+
+    def get_user_by_username(self, username):
+        """Get user details by username (without password check)."""
+        try:
+            self.connect()
+            cursor = self.connection.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("""
+                SELECT user_id, username, full_name, role, status,
+                       failed_attempts
+                FROM users
+                WHERE username = %s;
+            """, (username,))
+            result = cursor.fetchone()
+            cursor.close()
+            self.disconnect()
+            return result
+        except Exception as e:
+            print(f"Error: {e}")
+            return None
+
+    def update_last_login(self, user_id):
+        """Update user's last login timestamp + reset failed attempts."""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE users 
+                SET last_login = CURRENT_TIMESTAMP,
+                    failed_attempts = 0
+                WHERE user_id = %s;
+            """, (user_id,))
+            self.connection.commit()
+            cursor.close()
+            self.disconnect()
+            return True
+        except Exception as e:
+            print(f"Error: {e}")
+            return False
+
+    def increment_failed_attempts(self, username):
+        """Increment failed login counter; lock account after 5 fails."""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE users 
+                SET failed_attempts = failed_attempts + 1,
+                    status = CASE 
+                        WHEN failed_attempts + 1 >= 5 THEN 'LOCKED'
+                        ELSE status 
+                    END
+                WHERE username = %s;
+            """, (username,))
+            self.connection.commit()
+            cursor.close()
+            self.disconnect()
+            return True
+        except Exception as e:
+            print(f"Error: {e}")
+            return False
+
+    def log_login_attempt(self, user_id, username, success, reason=""):
+        """Log login attempt to login_history table."""
+        try:
+            self.connect()
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                INSERT INTO login_history 
+                (user_id, username, success, failure_reason)
+                VALUES (%s, %s, %s, %s);
+            """, (user_id, username, success, reason))
+            self.connection.commit()
+            cursor.close()
+            self.disconnect()
+            return True
+        except Exception as e:
+            print(f"Error: {e}")
+            return False
 
 # ═══════════════════════════════════════════════════════════
 #  STANDALONE TEST (Run this file directly to test)

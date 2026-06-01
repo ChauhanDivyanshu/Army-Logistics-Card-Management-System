@@ -1,5 +1,6 @@
 # main.py
-# 🎖  ARMY LOGISTICS - MAIN LAUNCHER (Compact Version)
+# 🎖 ARMY LOGISTICS - MAIN LAUNCHER (Role-Based)
+# Now with authentication & role-based access control
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -12,14 +13,20 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE)
 
 from database.db_helper import DatabaseHelper
-from shared.theme import COLORS, FONTS
+from shared.theme import COLORS, FONTS, ROLES
+from auth.session import Session
+from auth.permissions import has_permission, get_allowed_modules
+from auth.login_window import show_login
 
 
 class MainLauncher:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("🎖 Army Logistics System — Main Launcher")
+        self.root.title(
+            f"🎖 Army Logistics — {Session.get_full_name()} "
+            f"({Session.get_role()})"
+        )
         self.root.configure(bg=COLORS["bg"])
         self.root.geometry("1280x800")
         self.root.minsize(1100, 700)
@@ -35,6 +42,9 @@ class MainLauncher:
         self._check_db_connection()
         self._update_time()
 
+        # Handle window close
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
     def _build_ui(self):
         # IMPORTANT: Footer first to reserve bottom space
         self._build_footer()
@@ -42,16 +52,21 @@ class MainLauncher:
         self._build_status_bar()
         self._build_main_content()
 
+    # ═══════════════════════════════════════════════════════
+    # HEADER (with user info + logout)
+    # ═══════════════════════════════════════════════════════
+
     def _build_header(self):
         hdr = tk.Frame(self.root, bg=COLORS["primary"], height=80)
         hdr.pack(fill=tk.X)
         hdr.pack_propagate(False)
 
-        center = tk.Frame(hdr, bg=COLORS["primary"])
-        center.place(relx=0.5, rely=0.5, anchor="center")
+        # ─── LEFT: Logo + Title ───
+        left = tk.Frame(hdr, bg=COLORS["primary"])
+        left.pack(side=tk.LEFT, padx=20, fill=tk.Y)
 
-        logo_row = tk.Frame(center, bg=COLORS["primary"])
-        logo_row.pack()
+        logo_row = tk.Frame(left, bg=COLORS["primary"])
+        logo_row.pack(expand=True)
 
         tk.Label(logo_row, text="🎖",
                  font=("Segoe UI Emoji", 32),
@@ -62,26 +77,70 @@ class MainLauncher:
         title_box.pack(side=tk.LEFT)
 
         tk.Label(title_box, text="ARMY LOGISTICS SYSTEM",
-                 font=("Segoe UI", 18, "bold"),
+                 font=("Segoe UI", 16, "bold"),
                  bg=COLORS["primary"], fg="white").pack(anchor="w")
 
         tk.Label(title_box,
-                 text="MIFARE Classic 1K • PostgreSQL • "
-                      "Cargo Management",
-                 font=("Segoe UI", 9),
+                 text="MIFARE Classic 1K • PostgreSQL • Cargo Management",
+                 font=("Segoe UI", 8),
                  bg=COLORS["primary"], fg="#C8E6C9").pack(anchor="w")
 
+        # ─── RIGHT: User Info + Logout ───
+        right = tk.Frame(hdr, bg=COLORS["primary"])
+        right.pack(side=tk.RIGHT, padx=20, fill=tk.Y)
+
+        # Time
         self.time_var = tk.StringVar()
-        tk.Label(hdr, textvariable=self.time_var,
+        tk.Label(right, textvariable=self.time_var,
+                 font=("Segoe UI", 9, "bold"),
+                 bg=COLORS["primary"],
+                 fg=COLORS["accent"]).pack(anchor="e", pady=(8, 4))
+
+        # User info row
+        user_row = tk.Frame(right, bg=COLORS["primary"])
+        user_row.pack(anchor="e")
+
+        # Role badge
+        role_info = ROLES.get(Session.get_role(), {})
+        role_color = role_info.get("color", COLORS["muted"])
+        role_icon = role_info.get("icon", "👤")
+
+        badge = tk.Frame(user_row, bg=role_color)
+        badge.pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Label(badge,
+                 text=f"  {role_icon} {Session.get_role()}  ",
+                 font=("Segoe UI", 9, "bold"),
+                 bg=role_color, fg="white").pack(pady=4)
+
+        # Username
+        tk.Label(user_row,
+                 text=f"👤 {Session.get_full_name()}",
                  font=("Segoe UI", 10, "bold"),
                  bg=COLORS["primary"],
-                 fg=COLORS["accent"]).place(
-                     relx=0.98, rely=0.2, anchor="ne")
+                 fg="white").pack(side=tk.LEFT, padx=(0, 12))
+
+        # Logout button
+        logout_btn = tk.Button(
+            user_row, text="🚪 Logout",
+            command=self._handle_logout,
+            font=("Segoe UI", 9, "bold"),
+            bg=COLORS["danger"], fg="white",
+            relief=tk.FLAT, padx=14, pady=4,
+            cursor="hand2",
+            activebackground=COLORS["hover_danger"],
+            activeforeground="white"
+        )
+        logout_btn.pack(side=tk.LEFT)
 
     def _update_time(self):
         now = datetime.now().strftime("%d %b %Y | %H:%M:%S")
         self.time_var.set(f"🕐  {now}")
         self.root.after(1000, self._update_time)
+
+    # ═══════════════════════════════════════════════════════
+    # STATUS BAR
+    # ═══════════════════════════════════════════════════════
 
     def _build_status_bar(self):
         self.status_frame = tk.Frame(
@@ -113,6 +172,10 @@ class MainLauncher:
         )
         self.stats_lbl.pack(side=tk.RIGHT, padx=14)
 
+    # ═══════════════════════════════════════════════════════
+    # MAIN CONTENT (Role-based cards)
+    # ═══════════════════════════════════════════════════════
+
     def _build_main_content(self):
         main = tk.Frame(self.root, bg=COLORS["bg"])
         main.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
@@ -121,7 +184,12 @@ class MainLauncher:
         title_row = tk.Frame(main, bg=COLORS["bg"])
         title_row.pack(fill=tk.X, pady=(0, 10))
 
-        tk.Label(title_row, text="📋  SELECT MODULE TO LAUNCH",
+        # Role-specific welcome
+        role_info = ROLES.get(Session.get_role(), {})
+        role_label = role_info.get("label", "User")
+
+        tk.Label(title_row,
+                 text=f"📋  AVAILABLE MODULES — {role_label}",
                  font=("Segoe UI", 12, "bold"),
                  bg=COLORS["bg"],
                  fg=COLORS["primary"]).pack(side=tk.LEFT)
@@ -140,83 +208,109 @@ class MainLauncher:
         cards_wrap = tk.Frame(main, bg=COLORS["bg"])
         cards_wrap.pack(fill=tk.BOTH, expand=True)
 
-        cards_wrap.columnconfigure(0, weight=1, uniform="col")
-        cards_wrap.columnconfigure(1, weight=1, uniform="col")
-        cards_wrap.columnconfigure(2, weight=1, uniform="col")
-        cards_wrap.rowconfigure(0, weight=1, uniform="row")
-        cards_wrap.rowconfigure(1, weight=1, uniform="row")
-
-        modules = [
+        # ─── ALL MODULES (filtered by role) ───
+        all_modules = [
             {
-                "icon": "🏭", "title": "WAREHOUSE",
-                "subtitle": "Management",
+                "key": "warehouse_app",
+                "icon": "🏭", "title": "WAREHOUSE OPS",
+                "subtitle": "UHF Bulk Scanner",
                 "stat_key": "total_warehouses",
                 "stat_label": "Warehouses",
                 "script": "apps/warehouse_app.py",
-                "color": COLORS["info"],
-                "row": 0, "col": 0
+                "color": COLORS["warning"],  # Orange
             },
             {
+                "key": "container_app",
                 "icon": "📦", "title": "CONTAINER",
-                "subtitle": "Tag Management",
+                "subtitle": "Management",
                 "stat_key": "total_containers",
                 "stat_label": "Containers",
                 "script": "apps/container_app.py",
                 "color": COLORS["secondary"],
-                "row": 0, "col": 1
             },
             {
+                "key": "box_app",
                 "icon": "🗃", "title": "BOX / ITEM",
-                "subtitle": "Tag Management",
+                "subtitle": "Management",
                 "stat_key": "total_boxes",
                 "stat_label": "Boxes",
                 "script": "apps/box_app.py",
                 "color": COLORS["warning"],
-                "row": 0, "col": 2
             },
             {
-                "icon": "🪖", "title": "SOLDIER",
-                "subtitle": "Card Management",
+                "key": "trip_card_app",
+                "icon": "🚛", "title": "TRIP CARD",
+                "subtitle": "Trip Card Manager",
                 "stat_key": "total_soldiers",
-                "stat_label": "Soldiers",
-                "script": "apps/soldier_app.py",
-                "color": COLORS["dark"],
-                "row": 1, "col": 0
+                "stat_label": "Trips",
+                "script": "apps/trip_card_app.py",   # ← New file
+                "color": "#7B1FA2",  # Purple
             },
             {
+                "key": "gate_app",
                 "icon": "🎯", "title": "GATE",
                 "subtitle": "VERIFICATION",
                 "stat_key": "pending_requests",
                 "stat_label": "Pending",
                 "script": "apps/gate_app.py",
                 "color": COLORS["primary"],
-                                "row": 1, "col": 1,
                 "featured": True
             },
             {
-                "icon": "📊", "title": "SYSTEM",
-                "subtitle": "Dashboard",
+                "key": "uhf_writer_app",
+                "icon": "📡", "title": "UHF WRITER",
+                "subtitle": "Tag Management",
+                "stat_key": "total_boxes",
+                "stat_label": "Tagged Boxes",
+                "script": "apps/uhf_writer_app.py",
+                "color": "#7B1FA2",  # Purple
+            },
+            {
+                "key": "dashboard",
+                "icon": "📊", "title": "DASHBOARD",
+                "subtitle": "System Stats",
                 "stat_key": "completed_requests",
                 "stat_label": "Completed",
-                "script": None,
+                "script": "apps/dashboard_app.py",
                 "color": COLORS["muted"],
-                "row": 1, "col": 2,
-                "builtin": True
             }
         ]
 
-        self.stat_vars = {}
+        # ─── FILTER: Only show allowed modules ───
+        allowed = get_allowed_modules()
+        modules = [m for m in all_modules if m["key"] in allowed]
 
-        for mod in modules:
+        # ─── Calculate grid layout ───
+        num_modules = len(modules)
+        cols = 3
+        rows = (num_modules + cols - 1) // cols
+
+        for i in range(cols):
+            cards_wrap.columnconfigure(i, weight=1, uniform="col")
+        for i in range(rows):
+            cards_wrap.rowconfigure(i, weight=1, uniform="row")
+
+        # ─── Place cards in grid ───
+        self.stat_vars = {}
+        for idx, mod in enumerate(modules):
+            mod["row"] = idx // cols
+            mod["col"] = idx % cols
             self._build_module_card(cards_wrap, mod)
 
+        # If no modules available
+        if not modules:
+            tk.Label(cards_wrap,
+                     text="❌ No modules available for your role",
+                     font=("Segoe UI", 14, "bold"),
+                     bg=COLORS["bg"],
+                     fg=COLORS["danger"]).pack(expand=True, pady=100)
+
     def _build_module_card(self, parent, mod):
-        """Build a compact module card - guaranteed visible button."""
+        """Build a compact module card."""
         is_featured = mod.get("featured", False)
         border_color = COLORS["accent"] if is_featured else COLORS["border"]
         border_width = 3 if is_featured else 1
 
-        # Card frame
         card = tk.Frame(parent, bg=COLORS["white"],
                         relief=tk.SOLID, bd=border_width,
                         highlightbackground=border_color,
@@ -227,7 +321,7 @@ class MainLauncher:
         # Top color strip
         tk.Frame(card, bg=mod["color"], height=4).pack(fill=tk.X)
 
-        # Featured badge (small)
+        # Featured badge
         if is_featured:
             badge = tk.Frame(card, bg=COLORS["accent"], height=20)
             badge.pack(fill=tk.X)
@@ -237,7 +331,7 @@ class MainLauncher:
                      bg=COLORS["accent"],
                      fg=COLORS["dark"]).pack(pady=2)
 
-        # ─── BOTTOM: Launch Button (pack FIRST so it always visible) ───
+        # ─── Launch Button (bottom) ───
         if mod.get("builtin"):
             btn_text = "📊  VIEW DASHBOARD"
             cmd = self._show_dashboard
@@ -255,7 +349,6 @@ class MainLauncher:
                          activeforeground="white")
         btn.pack(side=tk.BOTTOM, fill=tk.X)
 
-        # Hover effects
         def on_enter(_, b=btn):
             b.configure(bg=COLORS["dark"])
 
@@ -265,16 +358,14 @@ class MainLauncher:
         btn.bind("<Enter>", on_enter)
         btn.bind("<Leave>", on_leave)
 
-        # ─── TOP: Content (fills remaining space) ───
+        # ─── Content (top) ───
         inner = tk.Frame(card, bg=COLORS["white"])
         inner.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
 
-        # Icon
         tk.Label(inner, text=mod["icon"],
                  font=("Segoe UI Emoji", 30),
                  bg=COLORS["white"]).pack(pady=(4, 6))
 
-        # Title
         tk.Label(inner, text=mod["title"],
                  font=("Segoe UI", 13, "bold"),
                  bg=COLORS["white"],
@@ -285,13 +376,11 @@ class MainLauncher:
                  bg=COLORS["white"],
                  fg=COLORS["muted"]).pack(pady=(0, 6))
 
-        # Underline
         tk.Frame(inner, bg=mod["color"], height=2,
                  width=40).pack(pady=(0, 8))
 
-        # Stats display
-        stat_box = tk.Frame(inner, bg="#F5F5F5",
-                             relief=tk.FLAT, bd=0)
+        # Stats
+        stat_box = tk.Frame(inner, bg="#F5F5F5", relief=tk.FLAT, bd=0)
         stat_box.pack(fill=tk.X, pady=(4, 0))
 
         stat_var = tk.StringVar(value="—")
@@ -307,21 +396,26 @@ class MainLauncher:
                  bg="#F5F5F5",
                  fg=COLORS["muted"]).pack(pady=(0, 6))
 
+    # ═══════════════════════════════════════════════════════
+    # FOOTER
+    # ═══════════════════════════════════════════════════════
+
     def _build_footer(self):
         footer = tk.Frame(self.root, bg=COLORS["dark"], height=30)
         footer.pack(fill=tk.X, side=tk.BOTTOM)
         footer.pack_propagate(False)
 
+        # Left: Copyright
         tk.Label(footer,
-                 text="© 2025 Indian Army  |  "
-                      "Army Logistics Card Management System",
+                 text="© 2025 Indian Army  |  Army Logistics Card Management System",
                  font=("Segoe UI", 8),
                  bg=COLORS["dark"],
                  fg="#B0BEC5").pack(side=tk.LEFT, padx=16, pady=6)
 
+        # Right: System info
         tk.Label(footer,
-                 text="Hardware: ACR122U  |  DB: PostgreSQL  |  "
-                      "Card: MIFARE 1K",
+                 text=f"Logged in as: {Session.get_username()}  |  "
+                      f"DB: PostgreSQL  |  Card: MIFARE 1K",
                  font=("Segoe UI", 8),
                  bg=COLORS["dark"],
                  fg="#B0BEC5").pack(side=tk.RIGHT, padx=16, pady=6)
@@ -386,9 +480,10 @@ class MainLauncher:
             script_path = os.path.join(BASE, script)
 
             if not os.path.isfile(script_path):
-                messagebox.showerror(
-                    "File Not Found",
-                    f"Cannot find:\n{script_path}"
+                messagebox.showwarning(
+                    "Coming Soon",
+                    f"This module is not yet implemented:\n\n{script}\n\n"
+                    f"It will be added in the next update."
                 )
                 return
 
@@ -400,6 +495,40 @@ class MainLauncher:
                 "Launch Error",
                 f"Failed to launch:\n{script}\n\nError: {e}"
             )
+
+    # ═══════════════════════════════════════════════════════
+    # LOGOUT
+    # ═══════════════════════════════════════════════════════
+
+    def _handle_logout(self):
+        """Handle logout - confirm and restart app."""
+        confirm = messagebox.askyesno(
+            "Logout Confirmation",
+            f"Are you sure you want to logout?\n\n"
+            f"User: {Session.get_full_name()}\n"
+            f"Role: {Session.get_role()}"
+        )
+
+        if confirm:
+            Session.logout()
+            self.root.destroy()
+            # Restart app (back to login)
+            python = sys.executable
+            os.execl(python, python, *sys.argv)
+
+    def _on_close(self):
+        """Handle window close."""
+        confirm = messagebox.askyesno(
+            "Exit Application",
+            "Are you sure you want to exit?"
+        )
+        if confirm:
+            Session.logout()
+            self.root.destroy()
+
+    # ═══════════════════════════════════════════════════════
+    # DASHBOARD POPUP
+    # ═══════════════════════════════════════════════════════
 
     def _show_dashboard(self):
         popup = tk.Toplevel(self.root)
@@ -442,19 +571,15 @@ class MainLauncher:
             s1.columnconfigure(i, weight=1)
 
         inventory_stats = [
-            ("🏭", "Warehouses",  stats['total_warehouses'],
-             COLORS["info"]),
-            ("📦", "Containers",  stats['total_containers'],
-             COLORS["secondary"]),
-            ("🗃", "Boxes",       stats['total_boxes'],
-             COLORS["warning"]),
+            ("🏭", "Warehouses",  stats['total_warehouses'], COLORS["info"]),
+            ("📦", "Containers",  stats['total_containers'], COLORS["secondary"]),
+            ("🗃", "Boxes",       stats['total_boxes'],      COLORS["warning"]),
         ]
 
         for i, (icon, label, value, color) in enumerate(inventory_stats):
             box = tk.Frame(s1, bg="#F5F5F5")
             box.grid(row=0, column=i, sticky="ew", padx=6, pady=6)
-            tk.Label(box, text=icon,
-                     font=("Segoe UI Emoji", 22),
+            tk.Label(box, text=icon, font=("Segoe UI Emoji", 22),
                      bg="#F5F5F5").pack(pady=(10, 4))
             tk.Label(box, text=str(value),
                      font=("Segoe UI", 22, "bold"),
@@ -478,22 +603,17 @@ class MainLauncher:
         for i in range(4):
             s2.columnconfigure(i, weight=1)
 
-            request_stats = [
-            ("🪖", "Soldiers",  stats['total_soldiers'],
-             COLORS["dark"]),
-            ("⏳", "Pending",   stats['pending_requests'],
-             COLORS["warning"]),
-            ("✅", "Assigned",  stats['assigned_requests'],
-             COLORS["info"]),
-            ("✓", "Completed", stats['completed_requests'],
-             COLORS["success"]),
+        request_stats = [
+            ("🪖", "Soldiers",  stats['total_soldiers'],     COLORS["dark"]),
+            ("⏳", "Pending",   stats['pending_requests'],   COLORS["warning"]),
+            ("✅", "Assigned",  stats['assigned_requests'],  COLORS["info"]),
+            ("✓", "Completed", stats['completed_requests'], COLORS["success"]),
         ]
 
         for i, (icon, label, value, color) in enumerate(request_stats):
             box = tk.Frame(s2, bg="#F5F5F5")
             box.grid(row=0, column=i, sticky="ew", padx=4, pady=6)
-            tk.Label(box, text=icon,
-                     font=("Segoe UI Emoji", 18),
+            tk.Label(box, text=icon, font=("Segoe UI Emoji", 18),
                      bg="#F5F5F5").pack(pady=(10, 2))
             tk.Label(box, text=str(value),
                      font=("Segoe UI", 18, "bold"),
@@ -544,12 +664,10 @@ class MainLauncher:
                     f"{h['status']:<12} "
                     f"{date_str:<20}\n")
         else:
-            history_text.insert(tk.END,
-                                 "\n  No assignment history found")
+            history_text.insert(tk.END, "\n  No assignment history found")
 
         history_text.configure(state="disabled")
 
-        # Close button
         tk.Button(body, text="✓  CLOSE",
                    command=popup.destroy,
                    font=("Segoe UI", 10, "bold"),
@@ -559,10 +677,29 @@ class MainLauncher:
 
 
 # ═══════════════════════════════════════════════════════════
-#  ENTRY POINT
+#  ENTRY POINT (Login → Launcher)
 # ═══════════════════════════════════════════════════════════
 
+def main():
+    """Main entry point - shows login first, then launcher."""
+    
+    # ─── STEP 1: Show login window ───
+    login_success = show_login()
+    
+    if not login_success:
+        print("❌ Login cancelled or failed. Exiting.")
+        return
+    
+    # ─── STEP 2: Show launcher (if logged in) ───
+    if Session.is_logged_in():
+        print(f"✅ Logged in as: {Session.get_full_name()} ({Session.get_role()})")
+        
+        root = tk.Tk()
+        app = MainLauncher(root)
+        root.mainloop()
+    else:
+        print("❌ Session not active. Exiting.")
+
+
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = MainLauncher(root)
-    root.mainloop()
+    main()

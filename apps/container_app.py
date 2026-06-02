@@ -1,15 +1,14 @@
 # apps/container_app.py
-# Container Tag Management App
-# Database + MIFARE Card Integration
-# Card pe sirf SKU-ID, baki sab database me
+# 📦 CONTAINER MANAGEMENT - With Shed Assignment + UHF Integration
+# Hierarchy: Warehouse → Shed → Container → Box
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 import sys
 import os
 import time
+import subprocess
 
-# Add parent folders to path
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(BASE, '..'))
 sys.path.append(os.path.join(BASE, '..', 'database'))
@@ -19,114 +18,76 @@ from db_helper import DatabaseHelper
 from theme import COLORS, FONTS
 
 
-# ═══════════════════════════════════════════════════════════
-#  CONTAINER CARD - Simple data model
-#  Card pe sirf SKU-ID write hota hai
-# ═══════════════════════════════════════════════════════════
-
-class ContainerCard:
-    """
-    Container card memory layout (Simple):
-    ┌─────────┬──────────────────────────────────────────────┐
-    │ Block 4 │ SKU-ID (16 bytes)                            │
-    │ Block 5 │ Card Type Identifier "CONTAINER" (16 bytes)  │
-    └─────────┴──────────────────────────────────────────────┘
-    
-    Baki sab info DATABASE se aati hai via SKU-ID lookup
-    """
-
-    def __init__(self):
-        self.sku_id    = ""
-        self.card_type = "CONTAINER"
-
-    def write(self, core):
-        """Write SKU-ID to card."""
-        if not core.authenticate(1):
-            raise Exception("Auth failed - Sector 1")
-
-        # Block 4: SKU-ID
-        core.write_block(4, core.encode(self.sku_id, 16))
-
-        # Block 5: Card type identifier
-        core.write_block(5, core.encode(self.card_type, 16))
-
-        return True
-
-    def read(self, core):
-        """Read SKU-ID from card."""
-        if not core.authenticate(1):
-            raise Exception("Auth failed - Sector 1")
-
-        # Read SKU-ID
-        b4 = core.read_block(4)
-        if b4:
-            self.sku_id = core.decode(b4)
-
-        # Read card type
-        b5 = core.read_block(5)
-        if b5:
-            self.card_type = core.decode(b5)
-
-
-# ═══════════════════════════════════════════════════════════
-#  MAIN APP
-# ═══════════════════════════════════════════════════════════
-
 class ContainerApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Container Management — Army Logistics")
+        self.root.title("CONTAINER MANAGEMENT — Indian Army")
         self.root.configure(bg=COLORS["bg"])
         self.root.geometry("1400x800")
-        self.root.minsize(1200, 700)
         try:
             self.root.state("zoomed")
         except Exception:
             pass
 
-        # Initialize
         self.db = DatabaseHelper()
         self.selected_container = None
-        self.warehouse_map = {}  # display_name -> warehouse_id
+        self.shed_map = {}        # display → shed_id
+        self.shed_filter_map = {} # for filter dropdown
+        self.fields = {}
+        self.all_containers = []
 
-        # Test DB connection
         success, msg = self.db.test_connection()
         if not success:
-            messagebox.showerror(
-                "Database Error",
-                f"Cannot connect to database!\n\n{msg}"
-            )
+            messagebox.showerror("Database Error", f"Cannot connect!\n\n{msg}")
             self.root.destroy()
             return
 
         self._setup_styles()
         self._build_ui()
-        self._load_warehouses_dropdown()
+        self._load_sheds_dropdown()
         self._load_containers()
 
-    
     def _setup_styles(self):
         s = ttk.Style()
         s.theme_use("clam")
-        s.configure(
-            "Custom.Treeview",
-            background=COLORS["white"],
-            foreground=COLORS["text"],
-            rowheight=30,
-            fieldbackground=COLORS["white"],
-            font=FONTS["body"],
-            borderwidth=0
-        )
-        s.configure(
-            "Custom.Treeview.Heading",
-            background=COLORS["primary"],
-            foreground="white",
-            font=FONTS["title"]
-        )
-        s.map("Custom.Treeview",
-              background=[("selected", COLORS["secondary"])],
-              foreground=[("selected", "white")])
+        
+        s.configure("Clean.Treeview",
+            background="white", foreground=COLORS["text"],
+            rowheight=32, font=("Segoe UI", 10),
+            fieldbackground="white")
+        
+        s.configure("Clean.Treeview.Heading",
+            background=COLORS["primary"], foreground="white",
+            font=("Segoe UI", 10, "bold"), padding=8, relief="flat")
+        
+        s.map("Clean.Treeview.Heading",
+            background=[("active", COLORS["primary"]),
+                        ("pressed", COLORS["primary_dark"])],
+            foreground=[("active", "white"),
+                        ("pressed", "white")],
+            relief=[("active", "flat"), ("pressed", "flat")])
+        
+        s.map("Clean.Treeview",
+              background=[("selected", "#FFE082")],
+              foreground=[("selected", "#1B5E20")])
+        
+        # Combobox styling
+        s.configure("TCombobox",
+            font=("Segoe UI", 10),
+            padding=5,
+            fieldbackground="white",
+            background="white",
+            arrowsize=18)
+        s.map("TCombobox",
+            fieldbackground=[("readonly", "white")],
+            foreground=[("readonly", COLORS["text"])])
+        
+        self.root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
+        self.root.option_add("*TCombobox*Listbox.background", "white")
+        self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", COLORS["primary"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "white")
 
     # ═══════════════════════════════════════════════════════
     # UI BUILD
@@ -134,1100 +95,646 @@ class ContainerApp:
 
     def _build_ui(self):
         self._build_header()
-        self._build_status_bars()
+        self._build_status_bar()
 
         main = tk.Frame(self.root, bg=COLORS["bg"])
         main.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
 
-        # Left: Container list
         self._build_container_list(main)
-
-        # Middle: Form
         self._build_form_panel(main)
-
-        # Right: Card operations + log
-        self._build_card_panel(main)
+        self._build_actions_panel(main)
 
         self._build_footer()
 
     def _build_header(self):
-        hdr = tk.Frame(self.root, bg=COLORS["primary"], height=60)
+        hdr = tk.Frame(self.root, bg=COLORS["primary"], height=75)
         hdr.pack(fill=tk.X)
         hdr.pack_propagate(False)
 
         left = tk.Frame(hdr, bg=COLORS["primary"])
-        left.pack(side=tk.LEFT, padx=16, pady=8)
-
-        tk.Label(left, text="📦",
-                 font=("Segoe UI Emoji", 24),
-                 bg=COLORS["primary"],
-                 fg=COLORS["accent"]).pack(side=tk.LEFT, padx=(0, 10))
-
+        left.pack(side=tk.LEFT, padx=20, pady=12)
+        
+        tk.Label(left, text="📦", font=("Segoe UI Emoji", 32),
+                 bg=COLORS["primary"], fg="white").pack(side=tk.LEFT, padx=(0, 15))
+        
         tb = tk.Frame(left, bg=COLORS["primary"])
         tb.pack(side=tk.LEFT)
-        tk.Label(tb, text="CONTAINER TAG MANAGEMENT",
-                 font=("Segoe UI", 13, "bold"),
+        tk.Label(tb, text="INDIAN ARMY", font=("Segoe UI", 10, "bold"),
+                 bg=COLORS["primary"], fg=COLORS["accent"]).pack(anchor="w")
+        tk.Label(tb, text="CONTAINER MANAGEMENT",
+                 font=("Segoe UI", 18, "bold"),
                  bg=COLORS["primary"], fg="white").pack(anchor="w")
-        tk.Label(tb,
-                 text="Database + MIFARE Card  •  1 Container = 1 Item Type",
-                 font=("Segoe UI", 8),
-                 bg=COLORS["primary"], fg="#C8E6C9").pack(anchor="w")
 
-        tk.Label(hdr, text="v1.0",
-                 font=("Segoe UI", 8, "bold"),
-                 bg=COLORS["primary"],
-                 fg="#C8E6C9").pack(side=tk.RIGHT, padx=18)
+        right = tk.Frame(hdr, bg=COLORS["primary"])
+        right.pack(side=tk.RIGHT, padx=20)
+        self.time_var = tk.StringVar()
+        tk.Label(right, textvariable=self.time_var,
+                 font=("Segoe UI", 11, "bold"),
+                 bg=COLORS["primary"], fg="white").pack(anchor="e", pady=(15, 0))
+        tk.Label(right, text="● ONLINE", font=("Segoe UI", 9, "bold"),
+                 bg=COLORS["primary"], fg="#4ade80").pack(anchor="e")
+        self._update_time()
 
-    def _build_status_bars(self):
-        # DB Status
-        self.db_status = tk.Frame(
-            self.root, bg=COLORS["success"], height=26
-        )
-        self.db_status.pack(fill=tk.X)
-        self.db_status.pack_propagate(False)
+    def _update_time(self):
+        from datetime import datetime
+        self.time_var.set(datetime.now().strftime("%d %b %Y  |  %H:%M:%S"))
+        self.root.after(1000, self._update_time)
 
-        tk.Label(self.db_status, text="🗄  Database: Connected",
+    def _build_status_bar(self):
+        status = tk.Frame(self.root, bg=COLORS["success"], height=26)
+        status.pack(fill=tk.X)
+        status.pack_propagate(False)
+        tk.Label(status, text="Database: Connected",
                  font=("Segoe UI", 9, "bold"),
-                 bg=COLORS["success"], fg="white").pack(
-                     side=tk.LEFT, padx=14)
-
+                 bg=COLORS["success"], fg="white").pack(side=tk.LEFT, padx=14)
         self.count_var = tk.StringVar(value="Total: 0 containers")
-        tk.Label(self.db_status, textvariable=self.count_var,
+        tk.Label(status, textvariable=self.count_var,
                  font=("Segoe UI", 9),
-                 bg=COLORS["success"], fg="white").pack(
-                     side=tk.RIGHT, padx=14)
+                 bg=COLORS["success"], fg="white").pack(side=tk.RIGHT, padx=14)
 
-        # Card Status
-        self.card_status = tk.Frame(
-            self.root, bg=COLORS["danger"], height=26
-        )
-        self.card_status.pack(fill=tk.X)
-        self.card_status.pack_propagate(False)
-
-        self.card_dot = tk.Label(
-            self.card_status, text="●",
-            font=("Segoe UI", 11, "bold"),
-            bg=COLORS["danger"], fg="white"
-        )
-        self.card_dot.pack(side=tk.LEFT, padx=(14, 6))
-
-        self.card_var = tk.StringVar(
-            value="No Card Detected — Place card on reader"
-        )
-        self.card_lbl = tk.Label(
-            self.card_status, textvariable=self.card_var,
-            font=("Segoe UI", 9, "bold"),
-            bg=COLORS["danger"], fg="white"
-        )
-        self.card_lbl.pack(side=tk.LEFT)
-
-        self.atr_var = tk.StringVar(value="ATR: --")
-        self.atr_lbl = tk.Label(
-            self.card_status, textvariable=self.atr_var,
-            font=("Consolas", 8),
-            bg=COLORS["danger"], fg="white"
-        )
-        self.atr_lbl.pack(side=tk.RIGHT, padx=14)
-
-    # ── Left Panel: Container List ────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # PANEL 1: ALL CONTAINERS (LEFT)
+    # ═══════════════════════════════════════════════════════
 
     def _build_container_list(self, parent):
-        left_frame = tk.LabelFrame(
-            parent,
-            text="  📋  ALL CONTAINERS (Database)  ",
+        # Fixed width container
+        list_container = tk.Frame(parent, bg=COLORS["bg"], width=650)
+        list_container.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 5))
+        list_container.pack_propagate(False)
+
+        frame = tk.LabelFrame(list_container, text="  ALL CONTAINERS  ",
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg"], fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH,
-                        expand=True, padx=(0, 5))
+            bd=1, relief=tk.SOLID)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        inner = tk.Frame(frame, bg=COLORS["bg_card"])
+        inner.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
         # Search
-        search_frame = tk.Frame(left_frame, bg=COLORS["bg"])
+        search_frame = tk.Frame(inner, bg=COLORS["bg_card"])
         search_frame.pack(fill=tk.X, padx=8, pady=8)
-
-        tk.Label(search_frame, text="🔍",
-                 font=("Segoe UI", 11),
-                 bg=COLORS["bg"]).pack(side=tk.LEFT, padx=(0, 4))
-
+        tk.Label(search_frame, text="Search:",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=COLORS["bg_card"]).pack(side=tk.LEFT, padx=(0, 6))
         self.search_var = tk.StringVar()
         self.search_var.trace("w", lambda *a: self._filter_containers())
         tk.Entry(search_frame, textvariable=self.search_var,
-                 font=("Segoe UI", 10), relief=tk.SOLID,
-                 bd=1, highlightbackground=COLORS["border"],
-                 highlightthickness=1).pack(
-                     side=tk.LEFT, fill=tk.X, expand=True)
+                 font=("Segoe UI", 10), relief=tk.SOLID, bd=1,
+                 highlightthickness=1,
+                 highlightbackground=COLORS["input_border"],
+                 highlightcolor=COLORS["primary"]
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
+
+        # ✅ NEW: Filter by Shed
+        filter_frame = tk.Frame(inner, bg=COLORS["bg_card"])
+        filter_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        tk.Label(filter_frame, text="Shed:",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=COLORS["bg_card"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.shed_filter_combo = ttk.Combobox(filter_frame, state="readonly",
+                                                font=("Segoe UI", 9))
+        self.shed_filter_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.shed_filter_combo.bind("<<ComboboxSelected>>",
+                                      lambda e: self._filter_containers())
 
         # Table
-        tree_frame = tk.Frame(left_frame, bg=COLORS["white"])
-        tree_frame.pack(fill=tk.BOTH, expand=True,
-                        padx=8, pady=(0, 8))
+        tf = tk.Frame(inner, bg=COLORS["bg_card"])
+        tf.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        cols = ("sku", "name", "item", "boxes", "qty", "warehouse")
-        self.tree = ttk.Treeview(
-            tree_frame, columns=cols,
-            show="headings", style="Custom.Treeview"
-        )
+        cols = ("sku", "name", "shed", "item", "boxes", "qty")
+        self.tree = ttk.Treeview(tf, columns=cols,
+            show="headings", style="Clean.Treeview")
 
-        self.tree.heading("sku",       text="SKU-ID")
-        self.tree.heading("name",      text="Name")
-        self.tree.heading("item",      text="Item")
-        self.tree.heading("boxes",     text="Boxes")
-        self.tree.heading("qty",       text="Total Qty")
-        self.tree.heading("warehouse", text="Warehouse")
+        self.tree.heading("sku", text="Container ID")
+        self.tree.heading("name", text="Name")
+        self.tree.heading("shed", text="Shed")
+        self.tree.heading("item", text="Item")
+        self.tree.heading("boxes", text="Boxes")
+        self.tree.heading("qty", text="Qty")
 
-        self.tree.column("sku",       width=100, anchor="w")
-        self.tree.column("name",      width=120, anchor="w")
-        self.tree.column("item",      width=90,  anchor="w")
-        self.tree.column("boxes",     width=60,  anchor="center")
-        self.tree.column("warehouse", width=90,  anchor="center")
+        # All center-aligned for proper alignment
+        self.tree.column("sku", width=95, anchor="center", stretch=False)
+        self.tree.column("name", width=140, anchor="center", stretch=False)
+        self.tree.column("shed", width=70, anchor="center", stretch=False)
+        self.tree.column("item", width=110, anchor="center", stretch=False)
+        self.tree.column("boxes", width=70, anchor="center", stretch=False)
+        self.tree.column("qty", width=85, anchor="center", stretch=False)
 
-        sb = ttk.Scrollbar(tree_frame, orient="vertical",
-                            command=self.tree.yview)
+        sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
-
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        self.tree.tag_configure("odd", background=COLORS["white"])
-        self.tree.tag_configure("even", background=COLORS["row_alt"])
-
-    # ── Middle Panel: Form ────────────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # PANEL 2: CONTAINER DETAILS FORM (MIDDLE)
+    # ═══════════════════════════════════════════════════════
 
     def _build_form_panel(self, parent):
         mid_frame = tk.Frame(parent, bg=COLORS["bg"], width=380)
         mid_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=5)
         mid_frame.pack_propagate(False)
 
-        # Form box
-                # ═══ UHF TAG OPERATIONS (replaces MIFARE) ═══
-        uhf_box = tk.LabelFrame(
-            mid_frame,  # or wherever your card section is
-            text="  📡  UHF TAG OPERATIONS  ",
+        # FORM
+        form_box = tk.LabelFrame(mid_frame,
+            text="  CONTAINER DETAILS  ",
             font=("Segoe UI", 10, "bold"),
-            bg=COLORS["bg"], fg="#7B1FA2",
-            bd=1, relief=tk.GROOVE
-        )
-        uhf_box.pack(fill=tk.X, pady=(0, 6))
+            bg=COLORS["bg"], fg=COLORS["primary"],
+            bd=1, relief=tk.SOLID)
+        form_box.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
 
-        uhf_inner = tk.Frame(uhf_box, bg=COLORS["white"])
-        uhf_inner.pack(fill=tk.X, padx=6, pady=6)
+        form_inner = tk.Frame(form_box, bg=COLORS["bg_card"])
+        form_inner.pack(fill=tk.X, padx=2, pady=2)
+        form_inner.columnconfigure(1, weight=1)
 
-        tk.Label(uhf_inner,
-            text="💡 Containers don't have UHF tags themselves.\n"
-                 "   Their boxes have UHF tags with SKU info.\n"
-                 "   Use UHF Writer to manage box tags.",
-            font=("Segoe UI", 8, "italic"),
-            bg=COLORS["white"], fg=COLORS["muted"],
-            justify="left").pack(anchor="w", padx=8, pady=(4, 8))
+        # Container ID
+        self._add_field(form_inner, 0, "Container ID:", "container_id")
+        # Container Name
+        self._add_field(form_inner, 1, "Name:", "container_name")
+        
+        # ✅ NEW: Shed dropdown (container belongs to shed)
+        tk.Label(form_inner, text="Shed:",
+                 font=("Segoe UI", 10),
+                 bg=COLORS["bg_card"], fg=COLORS["text"],
+                 anchor="w").grid(row=2, column=0, sticky="w", padx=8, pady=5)
+        self.shed_combo = ttk.Combobox(form_inner, state="readonly",
+            font=("Segoe UI", 10))
+        self.shed_combo.grid(row=2, column=1, sticky="ew", padx=8, pady=5)
+        self.fields["shed_id"] = self.shed_combo
 
-        tk.Button(uhf_inner, text="📡  WRITE UHF TAGS (Open UHF Writer)",
-                   command=self._launch_uhf_writer,
-                   font=("Segoe UI", 10, "bold"),
-                   bg="#7B1FA2", fg="white",
-                   relief=tk.FLAT, bd=0,
-                   pady=10, cursor="hand2",
-                   activebackground=COLORS["dark"],
-                   activeforeground="white").pack(fill=tk.X, pady=2)
-
-        self.warehouse_combo = ttk.Combobox(
-            form_inner, state="readonly",
-            font=("Segoe UI", 9)
-        )
-        self.warehouse_combo.grid(row=2, column=1, sticky="ew",
-                                    padx=10, pady=5)
-        self.fields["warehouse_id"] = self.warehouse_combo
-
-        # Row 3: Item Name
+        # Item Name
         self._add_field(form_inner, 3, "Item Name:", "item_name")
+        
+        # Auto-calculated info
+        tk.Label(form_inner, text="Boxes:",
+                 font=("Segoe UI", 10),
+                 bg=COLORS["bg_card"], fg=COLORS["text"],
+                 anchor="w").grid(row=4, column=0, sticky="w", padx=8, pady=5)
+        self.boxes_label = tk.Label(form_inner, text="0 (auto)",
+                                     font=("Segoe UI", 10, "bold"),
+                                     bg=COLORS["bg_card"],
+                                     fg=COLORS["primary"], anchor="w")
+        self.boxes_label.grid(row=4, column=1, sticky="ew", padx=8, pady=5)
+        
+        tk.Label(form_inner, text="Quantity:",
+                 font=("Segoe UI", 10),
+                 bg=COLORS["bg_card"], fg=COLORS["text"],
+                 anchor="w").grid(row=5, column=0, sticky="w", padx=8, pady=5)
+        self.qty_label = tk.Label(form_inner, text="0 (auto)",
+                                   font=("Segoe UI", 10, "bold"),
+                                   bg=COLORS["bg_card"],
+                                   fg=COLORS["primary"], anchor="w")
+        self.qty_label.grid(row=5, column=1, sticky="ew", padx=8, pady=5)
 
-        # Row 4: Total Boxes
-        self._add_field(form_inner, 4, "Total Boxes:", "total_boxes")
-
-        # Row 5: Total Quantity
-        self._add_field(form_inner, 5,
-                         "Total Quantity:", "total_quantity")
-
-        # Row 6: Status
+        # Status
         tk.Label(form_inner, text="Status:",
-                 font=("Segoe UI", 9),
-                 bg=COLORS["white"], fg=COLORS["text"],
-                 anchor="w").grid(row=6, column=0,
-                                   sticky="w", padx=10, pady=5)
-
-        self.status_combo = ttk.Combobox(
-            form_inner,
+                 font=("Segoe UI", 10),
+                 bg=COLORS["bg_card"], fg=COLORS["text"],
+                 anchor="w").grid(row=6, column=0, sticky="w", padx=8, pady=5)
+        self.status_combo = ttk.Combobox(form_inner,
             values=["ACTIVE", "SEALED", "DISPATCHED", "EMPTY"],
-            state="readonly", font=("Segoe UI", 9)
-        )
+            state="readonly", font=("Segoe UI", 10))
         self.status_combo.set("ACTIVE")
-        self.status_combo.grid(row=6, column=1, sticky="ew",
-                                padx=10, pady=5)
+        self.status_combo.grid(row=6, column=1, sticky="ew", padx=8, pady=5)
         self.fields["status"] = self.status_combo
 
-        # Help text
+        # Help
         tk.Label(form_inner,
-                 text="💡 Note: 1 container = 1 item type only\n"
-                      "   (e.g., Container A = only AK47)",
-                 font=("Segoe UI", 8, "italic"),
-                 bg=COLORS["white"],
-                 fg=COLORS["muted"],
-                 justify="left").grid(
-                     row=7, column=0, columnspan=2,
-                     sticky="w", padx=10, pady=(8, 6))
+            text="Note: 1 container = 1 item type\nTotals auto-calculated from boxes",
+            font=("Segoe UI", 8, "italic"),
+            bg=COLORS["bg_card"], fg=COLORS["text_muted"],
+            justify="left").grid(row=7, column=0, columnspan=2,
+                sticky="w", padx=8, pady=(5, 8))
 
-        # Database Actions
-        db_box = tk.LabelFrame(
-            mid_frame,
-            text="  🗄  DATABASE ACTIONS  ",
+        # ACTIONS
+        db_box = tk.LabelFrame(mid_frame, text="  ACTIONS  ",
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg"], fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
-        db_box.pack(fill=tk.X, pady=(0, 6))
+            bd=1, relief=tk.SOLID)
+        db_box.pack(side=tk.TOP, fill=tk.X)
 
-        db_inner = tk.Frame(db_box, bg=COLORS["white"])
-        db_inner.pack(fill=tk.X, padx=6, pady=6)
+        db_inner = tk.Frame(db_box, bg=COLORS["bg_card"])
+        db_inner.pack(fill=tk.X, padx=2, pady=2)
 
-        db_actions = [
-            ("➕  ADD TO DATABASE",
-             COLORS["success"], self._add_container),
-            ("✏  UPDATE SELECTED",
-             COLORS["info"], self._update_container),
-            ("🗑  DELETE SELECTED",
-             COLORS["danger"], self._delete_container),
-            ("🔄  REFRESH",
-             COLORS["warning"], self._load_containers),
-            ("🧹  CLEAR FORM",
-             COLORS["muted"], self._clear_form),
+        actions = [
+            ("ADD CONTAINER", COLORS["success"], self._add_container),
+            ("UPDATE / MOVE SHED", COLORS["info"], self._update_container),
+            ("DELETE SELECTED", COLORS["danger"], self._delete_container),
+            ("REFRESH", COLORS["warning"], self._load_containers),
+            ("CLEAR FORM", COLORS["text_muted"], self._clear_form),
         ]
 
-        for text, color, cmd in db_actions:
+        for text, color, cmd in actions:
             tk.Button(db_inner, text=text, command=cmd,
-                       font=("Segoe UI", 9, "bold"),
-                       bg=color, fg="white",
-                       relief=tk.FLAT, bd=0,
-                       pady=8, cursor="hand2",
-                       activebackground=COLORS["dark"],
-                       activeforeground="white").pack(
-                           fill=tk.X, pady=2)
+                font=("Segoe UI", 10, "bold"),
+                bg=color, fg="white",
+                relief=tk.FLAT, bd=0,
+                pady=5, cursor="hand2",
+                activebackground=COLORS["primary_dark"],
+                activeforeground="white").pack(fill=tk.X, padx=8, pady=1)
 
     def _add_field(self, parent, row, label, key):
-        """Helper to create label + entry row."""
         tk.Label(parent, text=label,
-                 font=("Segoe UI", 9),
-                 bg=COLORS["white"], fg=COLORS["text"],
-                 anchor="w").grid(row=row, column=0,
-                                   sticky="w", padx=10, pady=5)
-
+            font=("Segoe UI", 10),
+            bg=COLORS["bg_card"], fg=COLORS["text"],
+            anchor="w").grid(row=row, column=0, sticky="w", padx=8, pady=5)
         entry = tk.Entry(parent, font=("Segoe UI", 10),
-                          relief=tk.SOLID, bd=1,
-                          highlightbackground=COLORS["border"],
-                          highlightthickness=1)
-        entry.grid(row=row, column=1, sticky="ew",
-                   padx=10, pady=5)
+            relief=tk.SOLID, bd=1,
+            highlightthickness=1,
+            highlightbackground=COLORS["input_border"],
+            highlightcolor=COLORS["primary"])
+        entry.grid(row=row, column=1, sticky="ew", padx=8, pady=5, ipady=3)
         self.fields[key] = entry
 
-    # ── Right Panel: Card Operations + Log ────────────────
+    # ═══════════════════════════════════════════════════════
+    # PANEL 3: UHF + ACTIVITY LOG (RIGHT)
+    # ═══════════════════════════════════════════════════════
 
-    def _build_card_panel(self, parent):
-        right_frame = tk.Frame(parent, bg=COLORS["bg"], width=380)
-        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0))
-        right_frame.pack_propagate(False)
+    def _build_actions_panel(self, parent):
+        right_frame = tk.Frame(parent, bg=COLORS["bg"])
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
 
-        # Card Operations
-        card_box = tk.LabelFrame(
-            right_frame,
-            text="  💳  MIFARE CARD OPERATIONS  ",
+        # UHF OPERATIONS
+        uhf_box = tk.LabelFrame(right_frame,
+            text="  UHF TAG OPERATIONS  ",
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg"], fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
-        card_box.pack(fill=tk.X, pady=(0, 6))
+            bd=1, relief=tk.SOLID)
+        uhf_box.pack(fill=tk.X, pady=(0, 6))
 
-        card_inner = tk.Frame(card_box, bg=COLORS["white"])
-        card_inner.pack(fill=tk.X, padx=6, pady=6)
+        uhf_inner = tk.Frame(uhf_box, bg=COLORS["bg_card"])
+        uhf_inner.pack(fill=tk.X, padx=2, pady=2)
 
-        # Info text
-        tk.Label(
-            card_inner,
-            text="💡 Card pe sirf SKU-ID write hota hai.\n"
-                 "   Baki info database me rahegi.\n"
-                 "   Scan karte hi DB se details load hongi.",
-            font=("Segoe UI", 8),
-            bg=COLORS["white"], fg=COLORS["muted"],
-            justify="left"
-        ).pack(anchor="w", padx=8, pady=(4, 8))
+        tk.Label(uhf_inner,
+            text="Containers don't have UHF tags themselves.\n"
+                 "Their boxes have UHF tags with SKU info.\n"
+                 "Use UHF Writer to manage box tags.",
+            font=("Segoe UI", 9, "italic"),
+            bg=COLORS["bg_card"], fg=COLORS["text_muted"],
+            justify="left").pack(anchor="w", padx=10, pady=(10, 10))
 
-        card_actions = [
-            ("💾  WRITE SKU TO CARD",
-             COLORS["success"], self._write_to_card),
-            ("📖  READ FROM CARD",
-             COLORS["info"], self._read_from_card),
-            ("🔍  VERIFY CARD ↔ DB",
-             COLORS["warning"], self._verify_card_db),
-        ]
+        tk.Button(uhf_inner,
+            text="OPEN UHF WRITER",
+            command=self._launch_uhf_writer,
+            font=("Segoe UI", 12, "bold"),
+            bg=COLORS["primary"], fg="white",
+            relief=tk.FLAT, bd=0,
+            pady=12, cursor="hand2",
+            activebackground=COLORS["primary_dark"],
+            activeforeground="white").pack(fill=tk.X, padx=10, pady=(0, 10))
 
-        for text, color, cmd in card_actions:
-            tk.Button(card_inner, text=text, command=cmd,
-                       font=("Segoe UI", 10, "bold"),
-                       bg=color, fg="white",
-                       relief=tk.FLAT, bd=0,
-                       pady=10, cursor="hand2",
-                       activebackground=COLORS["dark"],
-                       activeforeground="white").pack(
-                           fill=tk.X, pady=3)
-
-        # Activity Log
-        log_box = tk.LabelFrame(
-            right_frame,
-            text="  📋  ACTIVITY LOG  ",
+        # SHED INFO (for selected container)
+        info_box = tk.LabelFrame(right_frame,
+            text="  SHED INFO  ",
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg"], fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
+            bd=1, relief=tk.SOLID)
+        info_box.pack(fill=tk.X, pady=(0, 6))
+
+        info_inner = tk.Frame(info_box, bg=COLORS["bg_card"])
+        info_inner.pack(fill=tk.X, padx=2, pady=2)
+
+        self.shed_info_var = tk.StringVar(value="Select a container to view shed info")
+        tk.Label(info_inner, textvariable=self.shed_info_var,
+            font=("Segoe UI", 9, "italic"),
+            bg=COLORS["bg_card"], fg=COLORS["text_muted"],
+            justify="left", wraplength=380
+        ).pack(anchor="w", padx=10, pady=10)
+
+        # ACTIVITY LOG
+        log_box = tk.LabelFrame(right_frame,
+            text="  ACTIVITY LOG  ",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg"], fg=COLORS["primary"],
+            bd=1, relief=tk.SOLID)
         log_box.pack(fill=tk.BOTH, expand=True)
 
-        log_inner = tk.Frame(log_box, bg=COLORS["white"])
-        log_inner.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        log_inner = tk.Frame(log_box, bg="#212121")
+        log_inner.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        self.log_text = tk.Text(
-            log_inner, font=("Consolas", 9),
-            bg="#0d1117", fg="#4ade80",
-            relief=tk.FLAT, bd=0, wrap=tk.WORD,
-            insertbackground="white"
-        )
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
+        self.log_text = tk.Text(log_inner, font=("Consolas", 9),
+            bg="#212121", fg="#4ade80",
+            relief=tk.FLAT, bd=0, wrap=tk.WORD)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
         sb = ttk.Scrollbar(log_inner, command=self.log_text.yview)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.config(yscrollcommand=sb.set)
 
+        self._log("Container Management started", "ok")
+
     def _build_footer(self):
-        footer = tk.Frame(self.root, bg=COLORS["dark"], height=24)
+        footer = tk.Frame(self.root, bg=COLORS["primary"], height=26)
         footer.pack(fill=tk.X, side=tk.BOTTOM)
         footer.pack_propagate(False)
-        tk.Label(footer,
-                 text="© 2025 Indian Army  |  "
-                      "Container Management Module",
-                 font=("Segoe UI", 8),
-                 bg=COLORS["dark"],
-                 fg=COLORS["muted"]).pack(side=tk.LEFT, padx=12, pady=4)
-        tk.Label(footer,
-                 text="DB: PostgreSQL  |  Card: MIFARE 1K",
-                 font=("Segoe UI", 8),
-                 bg=COLORS["dark"],
-                 fg=COLORS["muted"]).pack(side=tk.RIGHT, padx=12, pady=4)
+        tk.Label(footer, text="© 2025 Indian Army | Container Management",
+            font=("Segoe UI", 8), bg=COLORS["primary"],
+            fg="white").pack(side=tk.LEFT, padx=14, pady=5)
+        tk.Label(footer, text="Database: PostgreSQL",
+            font=("Segoe UI", 8), bg=COLORS["primary"],
+            fg=COLORS["accent"]).pack(side=tk.RIGHT, padx=14, pady=5)
 
     # ═══════════════════════════════════════════════════════
-    # LOGGING
+    # HELPERS
     # ═══════════════════════════════════════════════════════
 
     def _log(self, msg, level="info"):
-        icons = {"info": "ℹ", "ok": "✓", "err": "✗",
-                  "warn": "⚠", "lock": "🔐"}
+        icons = {"info": "ℹ", "ok": "✓", "err": "✗", "warn": "⚠"}
         ts = time.strftime("%H:%M:%S")
         try:
-            self.log_text.insert(
-                tk.END, f"[{ts}] {icons.get(level, '•')} {msg}\n")
+            self.log_text.insert(tk.END, f"[{ts}] {icons.get(level, '•')} {msg}\n")
             self.log_text.see(tk.END)
         except Exception:
             pass
 
     # ═══════════════════════════════════════════════════════
-    # CARD POLLING
+    # UHF WRITER LAUNCHER
     # ═══════════════════════════════════════════════════════
 
-    def _poll_card(self):
-        present = self.mifare.connect()
-        if present and not self.card_present:
-            atr = self.mifare.get_atr()
-            self.atr_var.set(f"ATR: {atr}")
-            self._set_card_status(
-                "Card Detected — Ready", COLORS["success"])
-            self._log("Card detected on reader", "ok")
-            self.card_present = True
-        elif not present and self.card_present:
-            self.atr_var.set("ATR: --")
-            self._set_card_status(
-                "No Card Detected — Place card on reader",
-                COLORS["danger"])
-            self._log("Card removed", "warn")
-            self.card_present = False
-        self.mifare.disconnect()
-        self.root.after(1500, self._poll_card)
-
-    def _set_card_status(self, text, color):
-        self.card_var.set(text)
-        for w in [self.card_status, self.card_dot,
-                  self.card_lbl, self.atr_lbl]:
-            try:
-                w.configure(bg=color)
-            except Exception:
-                pass
+    def _launch_uhf_writer(self):
+        uhf_app = os.path.join(BASE, 'uhf_writer_app.py')
+        
+        if not os.path.exists(uhf_app):
+            messagebox.showerror("Not Found",
+                f"UHF Writer app not found at:\n{uhf_app}")
+            return
+        
+        confirm_msg = "Open UHF Writer App?"
+        if self.selected_container:
+            confirm_msg += f"\n\nSelected: {self.selected_container}"
+        
+        if not messagebox.askyesno("Launch UHF Writer", confirm_msg):
+            return
+        
+        try:
+            subprocess.Popen([sys.executable, uhf_app])
+            self._log("Launched UHF Writer", "ok")
+            messagebox.showinfo("Launched",
+                "UHF Writer App opened!\n\n"
+                "Select container and write tags for boxes.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to launch: {e}")
 
     # ═══════════════════════════════════════════════════════
     # DATABASE OPERATIONS
     # ═══════════════════════════════════════════════════════
 
-    def _load_warehouses_dropdown(self):
-        """Populate warehouse dropdown from DB."""
-        warehouses = self.db.get_all_warehouses()
-        self.warehouse_map = {}
-
-        values = []
-        for w in warehouses:
-            display = f"{w['warehouse_id']} - {w['warehouse_name']}"
-            values.append(display)
-            self.warehouse_map[display] = w['warehouse_id']
-
-        self.warehouse_combo['values'] = values
-        if values:
-            self.warehouse_combo.set(values[0])
+    def _load_sheds_dropdown(self):
+        """Load sheds for both form dropdown and filter dropdown."""
+        sheds = self.db.get_all_sheds()
+        
+        # Form dropdown (no "all" option)
+        self.shed_map = {}
+        form_values = []
+        for s in sheds:
+            display = f"{s['shed_id']} - {s['shed_name']}"
+            form_values.append(display)
+            self.shed_map[display] = s['shed_id']
+        
+        self.shed_combo['values'] = form_values
+        if form_values:
+            self.shed_combo.set(form_values[0])
+        
+        # Filter dropdown (with "All Sheds")
+        self.shed_filter_map = {}
+        filter_values = ["All Sheds"]
+        for s in sheds:
+            display = f"{s['shed_id']} - {s['shed_name']}"
+            filter_values.append(display)
+            self.shed_filter_map[display] = s['shed_id']
+        
+        self.shed_filter_combo['values'] = filter_values
+        self.shed_filter_combo.set("All Sheds")
 
     def _load_containers(self):
-        """Load all containers from database into table."""
         for item in self.tree.get_children():
             self.tree.delete(item)
-
+        
         containers = self.db.get_all_containers()
         self.all_containers = containers
-
-        for i, c in enumerate(containers):
-            tag = "even" if i % 2 == 0 else "odd"
-            self.tree.insert(
-                "", tk.END,
-                values=(
-                    c['sku_id'],
-                    c['container_name'],
-                    c['item_name'],
-                    c['total_boxes'],
-                    c['total_quantity'],
-                    c['warehouse_id']
-                ),
-                tags=(tag,)
-            )
-
+        
+        for c in containers:
+            self.tree.insert("", tk.END, values=(
+                c['container_id'],
+                c['container_name'],
+                c.get('shed_id', '-') or '-',
+                c['item_name'],
+                c['total_boxes'],
+                c['total_quantity']
+            ))
+        
         self.count_var.set(f"Total: {len(containers)} containers")
-        self._log(f"Loaded {len(containers)} containers from DB",
-                   "ok")
+        self._log(f"Loaded {len(containers)} containers", "ok")
 
     def _filter_containers(self):
-        """Filter table based on search."""
         search = self.search_var.get().lower().strip()
+        shed_filter = self.shed_filter_combo.get()
+        
         for item in self.tree.get_children():
             self.tree.delete(item)
-
-        filtered = [
-            c for c in self.all_containers
-            if search in c['sku_id'].lower()
-            or search in c['container_name'].lower()
-            or search in c['item_name'].lower()
-        ]
-
-        for i, c in enumerate(filtered):
-            tag = "even" if i % 2 == 0 else "odd"
-            self.tree.insert(
-                "", tk.END,
-                values=(
-                    c['sku_id'], c['container_name'],
-                    c['item_name'], c['total_boxes'],
-                    c['total_quantity'], c['warehouse_id']
-                ),
-                tags=(tag,)
-            )
+        
+        filtered = self.all_containers
+        
+        # Filter by shed
+        if shed_filter and shed_filter != "All Sheds":
+            shed_id = self.shed_filter_map.get(shed_filter)
+            if shed_id:
+                filtered = [c for c in filtered if c.get('shed_id') == shed_id]
+        
+        # Filter by search
+        if search:
+            filtered = [c for c in filtered
+                if search in c['container_id'].lower()
+                or search in c['container_name'].lower()
+                or search in c['item_name'].lower()]
+        
+        for c in filtered:
+            self.tree.insert("", tk.END, values=(
+                c['container_id'],
+                c['container_name'],
+                c.get('shed_id', '-') or '-',
+                c['item_name'],
+                c['total_boxes'],
+                c['total_quantity']
+            ))
+        
+        self.count_var.set(f"Showing: {len(filtered)} of {len(self.all_containers)}")
 
     def _on_select(self, event):
-        """When user clicks a row, fill form."""
         selection = self.tree.selection()
         if not selection:
             return
-
+        
         values = self.tree.item(selection[0])['values']
-
         self._clear_form(refresh=False)
-
-        self.fields['sku_id'].insert(0, values[0])
+        
+        self.fields['container_id'].insert(0, values[0])
         self.fields['container_name'].insert(0, values[1])
-        self.fields['item_name'].insert(0, values[2])
-        self.fields['total_boxes'].insert(0, values[3])
-        self.fields['total_quantity'].insert(0, values[4])
-
-        # Set warehouse dropdown
-        warehouse_id = values[5]
-        for display, wid in self.warehouse_map.items():
-            if wid == warehouse_id:
-                self.warehouse_combo.set(display)
+        self.fields['item_name'].insert(0, values[3])
+        
+        # Show auto-calculated values
+        self.boxes_label.configure(text=f"{values[4]} (auto)")
+        self.qty_label.configure(text=f"{values[5]} (auto)")
+        
+        # Set shed dropdown
+        shed_id = values[2]
+        for display, sid in self.shed_map.items():
+            if sid == shed_id:
+                self.shed_combo.set(display)
                 break
-
-        # Get full container details for status
+        
+        # Get full container details
         container = self.db.get_container_by_id(values[0])
         if container:
-            self.status_combo.set(container['status'])
-
+            self.status_combo.set(container.get('status', 'ACTIVE'))
+            
+            # Show shed info
+            shed_name = container.get('shed_name', 'Unknown')
+            warehouse_name = container.get('warehouse_name', 'Unknown')
+            info_text = (
+                f"📦 Container: {values[0]}\n"
+                f"🏚️ Shed: {shed_id} ({shed_name})\n"
+                f"🏛️ Warehouse: {warehouse_name}\n"
+                f"📊 Stock: {values[4]} boxes, {values[5]} qty"
+            )
+            self.shed_info_var.set(info_text)
+        
         self.selected_container = values[0]
+        self.fields['container_id'].configure(state="readonly")
+        self._log(f"Selected: {values[0]}", "info")
 
-        # Make SKU readonly when editing
-        self.fields['sku_id'].configure(state="readonly")
-
-        self._log(f"Selected: {values[0]} ({values[2]})", "info")
-
-    def _get_warehouse_id(self):
-        """Get warehouse_id from dropdown selection."""
-        selected = self.warehouse_combo.get()
-        return self.warehouse_map.get(selected, "")
+    def _get_shed_id(self):
+        return self.shed_map.get(self.shed_combo.get(), "")
 
     def _add_container(self):
-        """Add new container to database."""
-        sku    = self.fields['sku_id'].get().strip()
-        name   = self.fields['container_name'].get().strip()
-        wid    = self._get_warehouse_id()
-        item   = self.fields['item_name'].get().strip()
-        boxes  = self.fields['total_boxes'].get().strip()
-        qty    = self.fields['total_quantity'].get().strip()
+        container_id = self.fields['container_id'].get().strip().upper()
+        name = self.fields['container_name'].get().strip()
+        shed_id = self._get_shed_id()
+        item = self.fields['item_name'].get().strip()
 
-        # Validation
-        if not sku:
-            messagebox.showwarning("Required", "SKU-ID is required!")
-            self.fields['sku_id'].focus()
-            return
-
-        if not name:
+        if not container_id or not name or not shed_id or not item:
             messagebox.showwarning("Required",
-                                    "Container Name is required!")
+                "Container ID, Name, Shed, and Item Name are required!")
             return
 
-        if not wid:
-            messagebox.showwarning("Required",
-                                    "Please select a Warehouse!")
+        if self.db.get_container_by_id(container_id):
+            messagebox.showerror("Duplicate", f"Container '{container_id}' already exists!")
             return
 
-        if not item:
-            messagebox.showwarning("Required", "Item Name is required!")
-            return
-
-        # Parse numbers
-        try:
-            boxes = int(boxes) if boxes else 0
-            qty   = int(qty) if qty else 0
-        except ValueError:
-            messagebox.showwarning(
-                "Invalid", "Boxes and Quantity must be numbers!"
-            )
-            return
-
-        # Check duplicate
-        existing = self.db.get_container_by_id(sku)
-        if existing:
-            messagebox.showerror(
-                "Duplicate",
-                f"Container SKU '{sku}' already exists!\n\n"
-                f"Use Update button to modify existing container."
-            )
-            return
-
-        # Insert into database
-        if self.db.add_container(sku, name, wid, item, boxes, qty):
-            self._log(f"Container {sku} added to database", "ok")
-            messagebox.showinfo(
-                "Success",
-                f"✅ Container added to database!\n\n"
-                f"SKU-ID: {sku}\n"
-                f"Name: {name}\n"
-                f"Item: {item}\n"
-                f"Warehouse: {wid}\n\n"
-                f"💡 Now click 'WRITE SKU TO CARD' to\n"
-                f"   program a MIFARE card for this container."
-            )
+        if self.db.add_container(container_id, name, shed_id, item):
+            self._log(f"Container {container_id} added in shed {shed_id}", "ok")
+            messagebox.showinfo("Success",
+                f"Container added!\n\n"
+                f"ID: {container_id}\n"
+                f"Shed: {shed_id}\n"
+                f"Item: {item}\n\n"
+                f"Now add boxes in Box Management.")
             self._clear_form()
             self._load_containers()
         else:
-            messagebox.showerror(
-                "Error", "Failed to add container to database!"
-            )
-            self._log(f"Failed to add container {sku}", "err")
+            messagebox.showerror("Error", "Failed to add container!")
 
     def _update_container(self):
-        """Update selected container."""
+        """Update container - including MOVE between sheds."""
         if not self.selected_container:
-            messagebox.showwarning(
-                "No Selection",
-                "Please select a container from the list first!"
-            )
+            messagebox.showwarning("No Selection", "Select a container first!")
             return
-
-        boxes = self.fields['total_boxes'].get().strip()
-        qty   = self.fields['total_quantity'].get().strip()
-
-        try:
-            boxes = int(boxes) if boxes else 0
-            qty   = int(qty) if qty else 0
-        except ValueError:
-            messagebox.showwarning(
-                "Invalid", "Boxes and Quantity must be numbers!"
-            )
+        
+        name = self.fields['container_name'].get().strip()
+        new_shed_id = self._get_shed_id()
+        item = self.fields['item_name'].get().strip()
+        status = self.status_combo.get()
+        
+        if not name or not new_shed_id or not item:
+            messagebox.showwarning("Required",
+                "Name, Shed, and Item Name are required!")
             return
-
-        if not messagebox.askyesno(
-            "Confirm Update",
-            f"Update container '{self.selected_container}'?"
-        ):
+        
+        # Check if shed is being changed
+        current = self.db.get_container_by_id(self.selected_container)
+        current_shed = current.get('shed_id', '') if current else ''
+        is_moving = current_shed != new_shed_id
+        
+        if is_moving:
+            confirm_msg = (f"MOVE container '{self.selected_container}'?\n\n"
+                          f"From Shed: {current_shed}\n"
+                          f"To Shed:   {new_shed_id}\n\n"
+                          f"All boxes will move with the container.")
+        else:
+            confirm_msg = f"Update '{self.selected_container}'?"
+        
+        if not messagebox.askyesno("Confirm", confirm_msg):
             return
-
-        # Update quantities (extend db_helper for full update)
-        if self.db.update_container_quantity(
-            self.selected_container, boxes, qty
-        ):
-            self._log(f"Container {self.selected_container} updated",
-                       "ok")
-            messagebox.showinfo(
-                "Success", "✅ Container updated successfully!"
-            )
+        
+        if self.db.update_container(self.selected_container,
+                                     container_name=name,
+                                     shed_id=new_shed_id,
+                                     item_name=item,
+                                     status=status):
+            if is_moving:
+                self._log(f"Moved {self.selected_container}: {current_shed} → {new_shed_id}", "ok")
+                messagebox.showinfo("Moved", 
+                    f"Container moved successfully!\n\n"
+                    f"{self.selected_container}\n"
+                    f"{current_shed} → {new_shed_id}")
+            else:
+                self._log(f"Updated {self.selected_container}", "ok")
+                messagebox.showinfo("Success", "Container updated!")
             self._clear_form()
             self._load_containers()
         else:
-            messagebox.showerror(
-                "Error", "Failed to update container!"
-            )
+            messagebox.showerror("Error", "Failed to update container!")
 
     def _delete_container(self):
-        """Delete selected container."""
         if not self.selected_container:
-            messagebox.showwarning(
-                "No Selection",
-                "Please select a container from the list first!"
-            )
+            messagebox.showwarning("No Selection", "Select a container first!")
             return
-
-        # Check if boxes exist
+        
         boxes = self.db.get_boxes_by_container(self.selected_container)
         if boxes:
-            messagebox.showerror(
-                "Cannot Delete",
-                f"❌ Container '{self.selected_container}' has "
-                f"{len(boxes)} box(es)!\n\n"
-                f"Delete or move all boxes first."
-            )
+            messagebox.showerror("Cannot Delete",
+                f"Container has {len(boxes)} box(es)!\n"
+                f"Delete boxes first from Box Management.")
             return
-
-        if not messagebox.askyesno(
-            "Confirm Delete",
-            f"⚠️  Delete container '{self.selected_container}'?\n\n"
-            f"This action cannot be undone!"
-        ):
+        
+        if not messagebox.askyesno("Confirm Delete",
+            f"Delete '{self.selected_container}'?\nThis cannot be undone!"):
             return
-
+        
         if self.db.delete_container(self.selected_container):
-            self._log(
-                f"Container {self.selected_container} deleted", "warn"
-            )
-            messagebox.showinfo(
-                "Success", "✅ Container deleted successfully!"
-            )
+            self._log(f"Deleted {self.selected_container}", "warn")
+            messagebox.showinfo("Success", "Container deleted!")
             self._clear_form()
             self._load_containers()
-        else:
-            messagebox.showerror(
-                "Error", "Failed to delete container!"
-            )
 
     def _clear_form(self, refresh=True):
-        """Clear all form fields."""
         for key, widget in self.fields.items():
-            if key in ["status", "warehouse_id"]:
+            if key in ["status", "shed_id"]:
                 continue
             try:
                 widget.configure(state="normal")
                 widget.delete(0, tk.END)
             except Exception:
                 pass
-
+        
         self.status_combo.set("ACTIVE")
-        if self.warehouse_combo['values']:
-            self.warehouse_combo.set(
-                self.warehouse_combo['values'][0]
-            )
-
+        if self.shed_combo['values']:
+            self.shed_combo.set(self.shed_combo['values'][0])
+        
+        self.boxes_label.configure(text="0 (auto)")
+        self.qty_label.configure(text="0 (auto)")
+        self.shed_info_var.set("Select a container to view shed info")
+        
         self.selected_container = None
-
-        # Clear tree selection
         for item in self.tree.selection():
             self.tree.selection_remove(item)
-
+        
         if refresh:
             self._log("Form cleared", "info")
 
-    # ═══════════════════════════════════════════════════════
-    # MIFARE CARD OPERATIONS
-    # ═══════════════════════════════════════════════════════
-
-    def _write_to_card(self):
-        """Write SKU-ID to MIFARE card."""
-        sku = self.fields['sku_id'].get().strip()
-
-        if not sku:
-            messagebox.showwarning(
-                "Required",
-                "Please enter or select a SKU-ID first!"
-            )
-            return
-
-        # Verify container exists in DB
-        container = self.db.get_container_by_id(sku)
-        if not container:
-            if not messagebox.askyesno(
-                "Not in Database",
-                f"Container '{sku}' is not in database!\n\n"
-                f"Do you still want to write it to card?"
-            ):
-                return
-
-        # Check card present
-        if not self.mifare.connect():
-            messagebox.showerror(
-                "No Card",
-                "Place MIFARE card on reader!"
-            )
-            return
-
-        try:
-            self._log("═" * 36)
-            self._log(f"WRITING SKU-ID to card: {sku}", "info")
-
-            card = ContainerCard()
-            card.sku_id = sku
-            card.write(self.mifare)
-
-            self._log(f"✅ Card programmed with SKU: {sku}", "ok")
-
-            # Show success with details
-            info = f"✅ Card programmed successfully!\n\n"
-            info += f"SKU-ID: {sku}\n"
-            info += f"Card Type: CONTAINER\n\n"
-
-            if container:
-                info += f"📦 Container Details (from DB):\n"
-                info += f"  Name: {container['container_name']}\n"
-                info += f"  Item: {container['item_name']}\n"
-                info += f"  Warehouse: {container['warehouse_name']}\n"
-                info += f"  Boxes: {container['total_boxes']}\n"
-                info += f"  Qty: {container['total_quantity']}"
-
-            messagebox.showinfo("Success", info)
-
-        except Exception as e:
-            self._log(f"Write error: {e}", "err")
-            messagebox.showerror("Write Error", str(e))
-        finally:
-            self.mifare.disconnect()
-
-    def _read_from_card(self):
-        """Read SKU-ID from card and load DB info."""
-        if not self.mifare.connect():
-            messagebox.showerror(
-                "No Card",
-                "Place MIFARE card on reader!"
-            )
-            return
-
-        try:
-            self._log("═" * 36)
-            self._log("READING container card...", "info")
-
-            card = ContainerCard()
-            card.read(self.mifare)
-
-            if not card.sku_id:
-                messagebox.showwarning(
-                    "Empty Card",
-                    "This card has no SKU-ID written on it!"
-                )
-                return
-
-            self._log(f"Card SKU-ID: {card.sku_id}", "ok")
-            self._log(f"Card Type: {card.card_type}", "ok")
-
-            # Lookup in database
-            container = self.db.get_container_by_id(card.sku_id)
-
-            if container:
-                self._log("✅ Container found in database", "ok")
-
-                # Auto-fill form
-                self._clear_form(refresh=False)
-                self.fields['sku_id'].insert(0, container['sku_id'])
-                self.fields['container_name'].insert(
-                    0, container['container_name'])
-                self.fields['item_name'].insert(
-                    0, container['item_name'])
-                self.fields['total_boxes'].insert(
-                    0, str(container['total_boxes']))
-                self.fields['total_quantity'].insert(
-                    0, str(container['total_quantity']))
-
-                # Set warehouse
-                for display, wid in self.warehouse_map.items():
-                    if wid == container['warehouse_id']:
-                        self.warehouse_combo.set(display)
-                        break
-
-                self.status_combo.set(container['status'])
-                self.selected_container = container['sku_id']
-                self.fields['sku_id'].configure(state="readonly")
-
-                # Show success popup
-                self._show_container_details(container)
-
-            else:
-                self._log(
-                    f"⚠ SKU '{card.sku_id}' not found in DB", "warn"
-                )
-                messagebox.showwarning(
-                    "Not Found",
-                    f"Card SKU-ID: {card.sku_id}\n\n"
-                    f"❌ Not found in database!\n\n"
-                    f"This card may be orphaned or from\n"
-                    f"another system."
-                )
-
-        except Exception as e:
-            self._log(f"Read error: {e}", "err")
-            messagebox.showerror("Read Error", str(e))
-        finally:
-            self.mifare.disconnect()
-
-    def _verify_card_db(self):
-        """Verify card SKU matches database entry."""
-        if not self.mifare.connect():
-            messagebox.showerror(
-                "No Card", "Place card on reader!"
-            )
-            return
-
-        try:
-            self._log("═" * 36)
-            self._log("VERIFYING card with database...", "info")
-
-            card = ContainerCard()
-            card.read(self.mifare)
-
-            if not card.sku_id:
-                messagebox.showwarning(
-                    "Empty Card", "Card has no SKU-ID!"
-                )
-                return
-
-            container = self.db.get_container_by_id(card.sku_id)
-
-            if container:
-                # Get boxes count from DB
-                boxes = self.db.get_boxes_by_container(card.sku_id)
-
-                msg = f"✅ VERIFICATION SUCCESSFUL\n\n"
-                msg += f"{'─'*30}\n"
-                msg += f"Card SKU-ID:  {card.sku_id}\n"
-                msg += f"Card Type:    {card.card_type}\n"
-                msg += f"{'─'*30}\n\n"
-                msg += f"📦 Database Match:\n"
-                msg += f"  Container:  {container['container_name']}\n"
-                msg += f"  Item:       {container['item_name']}\n"
-                msg += f"  Warehouse:  {container['warehouse_name']}\n"
-                msg += f"  Location:   {container['location']}\n"
-                msg += f"  Boxes:      {len(boxes)} actual / "
-                msg += f"{container['total_boxes']} expected\n"
-                msg += f"  Total Qty:  {container['total_quantity']}\n"
-                msg += f"  Status:     {container['status']}"
-
-                self._log("Card verified successfully", "ok")
-                messagebox.showinfo("Verification OK", msg)
-            else:
-                self._log(
-                    f"Card SKU not in DB: {card.sku_id}", "err"
-                )
-                messagebox.showerror(
-                    "Verification Failed",
-                    f"❌ Card SKU '{card.sku_id}' "
-                    f"NOT found in database!\n\n"
-                    f"This card may be invalid or removed."
-                )
-
-        except Exception as e:
-            self._log(f"Verify error: {e}", "err")
-            messagebox.showerror("Error", str(e))
-        finally:
-            self.mifare.disconnect()
-
-    def _show_container_details(self, container):
-        """Show detailed popup of container info from DB."""
-        popup = tk.Toplevel(self.root)
-        popup.title("Container Details (from Database)")
-        popup.configure(bg=COLORS["bg"])
-        popup.geometry("500x600")
-        popup.grab_set()
-
-        # Header
-        hdr = tk.Frame(popup, bg=COLORS["primary"], height=54)
-        hdr.pack(fill=tk.X)
-        hdr.pack_propagate(False)
-        tk.Label(hdr, text="📦  CONTAINER VERIFIED",
-                 font=("Segoe UI", 13, "bold"),
-                 bg=COLORS["primary"],
-                 fg="white").pack(pady=13)
-
-        # Status banner
-        stat = tk.Frame(popup, bg=COLORS["success"], height=34)
-        stat.pack(fill=tk.X)
-        stat.pack_propagate(False)
-        tk.Label(stat,
-                 text=f"✓  Card SKU matches Database Entry",
-                 font=("Segoe UI", 10, "bold"),
-                 bg=COLORS["success"],
-                 fg="white").pack(pady=7)
-
-        # Body
-        body = tk.Frame(popup, bg=COLORS["bg"])
-        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
-
-        def info_block(title, rows):
-            frm = tk.LabelFrame(
-                body, text=f"  {title}",
-                font=("Segoe UI", 9, "bold"),
-                bg=COLORS["white"],
-                fg=COLORS["primary"],
-                bd=1, relief=tk.GROOVE
-            )
-            frm.pack(fill=tk.X, pady=(0, 6))
-            inner = tk.Frame(frm, bg=COLORS["white"])
-            inner.pack(fill=tk.X, padx=8, pady=6)
-            for lbl, val in rows:
-                row = tk.Frame(inner, bg=COLORS["white"])
-                row.pack(fill=tk.X, pady=2)
-                tk.Label(row, text=f"{lbl}:",
-                         font=("Segoe UI", 9),
-                         bg=COLORS["white"],
-                         fg=COLORS["muted"],
-                         width=15,
-                         anchor="w").pack(side=tk.LEFT)
-                tk.Label(row, text=str(val) if val else "—",
-                         font=("Segoe UI", 9, "bold"),
-                         bg=COLORS["white"],
-                         fg=COLORS["text"]).pack(side=tk.LEFT)
-
-        # Container info
-        info_block("📦  CONTAINER INFORMATION", [
-            ("SKU-ID",         container['sku_id']),
-            ("Container Name", container['container_name']),
-            ("Item Name",      container['item_name']),
-            ("Status",         container['status']),
-        ])
-
-        # Warehouse info
-        info_block("🏭  WAREHOUSE LOCATION", [
-            ("Warehouse ID",   container['warehouse_id']),
-            ("Warehouse Name", container['warehouse_name']),
-            ("Location",       container['location']),
-        ])
-
-        # Inventory info
-        info_block("📊  INVENTORY", [
-            ("Total Boxes",    container['total_boxes']),
-            ("Total Quantity", container['total_quantity']),
-        ])
-
-        # Get boxes inside
-        boxes = self.db.get_boxes_by_container(container['sku_id'])
-
-        boxes_box = tk.LabelFrame(
-            body,
-            text=f"  🗃  BOXES INSIDE ({len(boxes)} total)  ",
-            font=("Segoe UI", 9, "bold"),
-            bg=COLORS["white"],
-            fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
-        boxes_box.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
-
-        boxes_inner = tk.Frame(boxes_box, bg=COLORS["white"])
-        boxes_inner.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-
-        if boxes:
-            box_text = tk.Text(
-                boxes_inner, font=("Consolas", 9),
-                bg="#F8FFF8", fg=COLORS["text"],
-                relief=tk.FLAT, height=6
-            )
-            box_text.pack(fill=tk.BOTH, expand=True)
-
-            for b in boxes:
-                box_text.insert(
-                    tk.END,
-                    f"  {b['box_uid']:<12} | "
-                    f"Qty: {b['quantity']:<5} {b['unit']} | "
-                    f"Batch: {b['batch_number']}\n"
-                )
-            box_text.configure(state="disabled")
-        else:
-            tk.Label(boxes_inner,
-                     text="No boxes added yet",
-                     font=("Segoe UI", 9, "italic"),
-                     bg=COLORS["white"],
-                     fg=COLORS["muted"]).pack(pady=14)
-
-        # Close button
-        tk.Button(body, text="✓  CLOSE",
-                   font=("Segoe UI", 10, "bold"),
-                   bg=COLORS["primary"], fg="white",
-                   relief=tk.FLAT, pady=10,
-                   cursor="hand2",
-                   command=popup.destroy).pack(fill=tk.X, pady=(4, 0))
-        
-        
-    def _launch_uhf_writer(self):
-        """Launch UHF Writer App for selected box's container."""
-        # Get selected container from selected box
-        if not self.selected_box:
-            messagebox.showwarning("Select Box",
-                "Please select a box first!")
-            return
-        
-        # Get the SKU/container for this box
-        sku = self.selected_box.get('container_id', 'Unknown')
-        
-        if not messagebox.askyesno("Launch UHF Writer",
-            f"Open UHF Writer App?\n\n"
-            f"Container: {sku}\n"
-            f"Box: {self.selected_box.get('box_uid')}\n\n"
-            f"You can write UHF tags there."):
-            return
-        
-        import subprocess
-        import sys
-        
-        BASE = os.path.dirname(os.path.abspath(__file__))
-        uhf_app = os.path.join(BASE, 'uhf_writer_app.py')
-        
-        if os.path.exists(uhf_app):
-            try:
-                subprocess.Popen([sys.executable, uhf_app])
-                self._log(f"✓ Launched UHF Writer", "ok")
-                messagebox.showinfo("Launched",
-                    f"UHF Writer App opened!\n\n"
-                    f"Select container '{sku}'\n"
-                    f"and write tags for boxes.")
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to launch: {e}")
-        else:
-            messagebox.showerror("Not Found",
-                f"UHF Writer app not found!")
-
-
-# ═══════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ═══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app  = ContainerApp(root)
+    app = ContainerApp(root)
     root.mainloop()

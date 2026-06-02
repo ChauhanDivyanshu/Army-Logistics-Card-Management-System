@@ -1,14 +1,14 @@
 # apps/box_app.py
-# Box Tag Management App
-# Database + MIFARE Card Integration
+# 🗃 BOX MANAGEMENT - Updated for new schema (Shed → Container → Box)
+# Each box has variable quantity + UHF tag EPC
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 import sys
 import os
 import time
+import subprocess
 
-# Add parent folders to path
 BASE = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(BASE, '..'))
 sys.path.append(os.path.join(BASE, '..', 'database'))
@@ -16,1240 +16,762 @@ sys.path.append(os.path.join(BASE, '..', 'shared'))
 
 from db_helper import DatabaseHelper
 from theme import COLORS, FONTS
-from mifare_core import MifareCore
 
-
-# ═══════════════════════════════════════════════════════════
-#  BOX CARD - Simple data model
-# ═══════════════════════════════════════════════════════════
-
-class BoxCard:
-    """
-    Box card memory layout (Simple):
-    ┌─────────┬──────────────────────────────────────────────┐
-    │ Block 4 │ Box UID (16 bytes)                           │
-    │ Block 5 │ Card Type "BOX" (16 bytes)                   │
-    └─────────┴──────────────────────────────────────────────┘
-    
-    Baki sab info DATABASE se aati hai via Box UID lookup
-    """
-
-    def __init__(self):
-        self.box_uid   = ""
-        self.card_type = "BOX"
-
-    def write(self, core):
-        if not core.authenticate(1):
-            raise Exception("Auth failed - Sector 1")
-        core.write_block(4, core.encode(self.box_uid, 16))
-        core.write_block(5, core.encode(self.card_type, 16))
-        return True
-
-    def read(self, core):
-        if not core.authenticate(1):
-            raise Exception("Auth failed - Sector 1")
-        b4 = core.read_block(4)
-        if b4:
-            self.box_uid = core.decode(b4)
-        b5 = core.read_block(5)
-        if b5:
-            self.card_type = core.decode(b5)
-
-
-# ═══════════════════════════════════════════════════════════
-#  MAIN APP
-# ═══════════════════════════════════════════════════════════
 
 class BoxApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Box Tag Management — Army Logistics")
+        self.root.title("BOX MANAGEMENT — Indian Army")
         self.root.configure(bg=COLORS["bg"])
         self.root.geometry("1400x800")
-        self.root.minsize(1200, 700)
         try:
             self.root.state("zoomed")
         except Exception:
             pass
 
-        # Initialize
         self.db = DatabaseHelper()
-        self.mifare = MifareCore(self._log)
         self.selected_box = None
-        self.card_present = False
-        self.container_map = {}  # display_name -> sku_id
+        self.container_map = {}
+        self.container_info = {}
+        self.shed_filter_map = {}
+        self.fields = {}
+        self.all_boxes = []
 
-        # Test DB connection
         success, msg = self.db.test_connection()
         if not success:
-            messagebox.showerror(
-                "Database Error",
-                f"Cannot connect to database!\n\n{msg}"
-            )
+            messagebox.showerror("Database Error", f"Cannot connect!\n\n{msg}")
             self.root.destroy()
             return
 
         self._setup_styles()
         self._build_ui()
+        self._load_sheds_filter()
         self._load_containers_dropdown()
         self._load_boxes()
-
-        # Start card polling
-        self.mifare.find_reader()
-        self._poll_card()
 
     def _setup_styles(self):
         s = ttk.Style()
         s.theme_use("clam")
-        s.configure(
-            "Custom.Treeview",
-            background=COLORS["white"],
-            foreground=COLORS["text"],
-            rowheight=30,
-            fieldbackground=COLORS["white"],
-            font=FONTS["body"],
-            borderwidth=0
-        )
-        s.configure(
-            "Custom.Treeview.Heading",
-            background=COLORS["primary"],
-            foreground="white",
-            font=FONTS["title"]
-        )
-        s.map("Custom.Treeview",
-              background=[("selected", COLORS["secondary"])],
-              foreground=[("selected", "white")])
-
-    # ═══════════════════════════════════════════════════════
-    # UI BUILD
-    # ═══════════════════════════════════════════════════════
+        
+        s.configure("Clean.Treeview",
+            background="white", foreground=COLORS["text"],
+            rowheight=32, font=("Segoe UI", 10),
+            fieldbackground="white")
+        
+        s.configure("Clean.Treeview.Heading",
+            background=COLORS["primary"], foreground="white",
+            font=("Segoe UI", 10, "bold"), padding=8, relief="flat")
+        
+        s.map("Clean.Treeview.Heading",
+            background=[("active", COLORS["primary"]),
+                        ("pressed", COLORS["primary_dark"])],
+            foreground=[("active", "white"),
+                        ("pressed", "white")],
+            relief=[("active", "flat"), ("pressed", "flat")])
+        
+        s.map("Clean.Treeview",
+              background=[("selected", "#FFE082")],
+              foreground=[("selected", "#1B5E20")])
+        
+        s.configure("TCombobox",
+            font=("Segoe UI", 10),
+            padding=5,
+            fieldbackground="white",
+            background="white",
+            arrowsize=18)
+        s.map("TCombobox",
+            fieldbackground=[("readonly", "white")],
+            foreground=[("readonly", COLORS["text"])])
+        
+        self.root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 10))
+        self.root.option_add("*TCombobox*Listbox.background", "white")
+        self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", COLORS["primary"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "white")
 
     def _build_ui(self):
         self._build_header()
-        self._build_status_bars()
+        self._build_status_bar()
 
         main = tk.Frame(self.root, bg=COLORS["bg"])
         main.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
 
         self._build_box_list(main)
         self._build_form_panel(main)
-        self._build_card_panel(main)
+        self._build_actions_panel(main)
 
         self._build_footer()
 
     def _build_header(self):
-        hdr = tk.Frame(self.root, bg=COLORS["primary"], height=60)
+        hdr = tk.Frame(self.root, bg=COLORS["primary"], height=75)
         hdr.pack(fill=tk.X)
         hdr.pack_propagate(False)
 
         left = tk.Frame(hdr, bg=COLORS["primary"])
-        left.pack(side=tk.LEFT, padx=16, pady=8)
-
-        tk.Label(left, text="🗃",
-                 font=("Segoe UI Emoji", 24),
-                 bg=COLORS["primary"],
-                 fg=COLORS["accent"]).pack(side=tk.LEFT, padx=(0, 10))
-
+        left.pack(side=tk.LEFT, padx=20, pady=12)
+        tk.Label(left, text="🗃", font=("Segoe UI Emoji", 32),
+                 bg=COLORS["primary"], fg="white").pack(side=tk.LEFT, padx=(0, 15))
         tb = tk.Frame(left, bg=COLORS["primary"])
         tb.pack(side=tk.LEFT)
-        tk.Label(tb, text="BOX TAG MANAGEMENT",
-                 font=("Segoe UI", 13, "bold"),
+        tk.Label(tb, text="INDIAN ARMY", font=("Segoe UI", 10, "bold"),
+                 bg=COLORS["primary"], fg=COLORS["accent"]).pack(anchor="w")
+        tk.Label(tb, text="BOX MANAGEMENT",
+                 font=("Segoe UI", 18, "bold"),
                  bg=COLORS["primary"], fg="white").pack(anchor="w")
-        tk.Label(tb,
-                 text="Database + MIFARE Card  •  Individual Box Tracking",
-                 font=("Segoe UI", 8),
-                 bg=COLORS["primary"], fg="#C8E6C9").pack(anchor="w")
 
-        tk.Label(hdr, text="v1.0",
-                 font=("Segoe UI", 8, "bold"),
-                 bg=COLORS["primary"],
-                 fg="#C8E6C9").pack(side=tk.RIGHT, padx=18)
+        right = tk.Frame(hdr, bg=COLORS["primary"])
+        right.pack(side=tk.RIGHT, padx=20)
+        self.time_var = tk.StringVar()
+        tk.Label(right, textvariable=self.time_var,
+                 font=("Segoe UI", 11, "bold"),
+                 bg=COLORS["primary"], fg="white").pack(anchor="e", pady=(15, 0))
+        tk.Label(right, text="● ONLINE", font=("Segoe UI", 9, "bold"),
+                 bg=COLORS["primary"], fg="#4ade80").pack(anchor="e")
+        self._update_time()
 
-    def _build_status_bars(self):
-        # DB Status
-        self.db_status = tk.Frame(
-            self.root, bg=COLORS["success"], height=26
-        )
-        self.db_status.pack(fill=tk.X)
-        self.db_status.pack_propagate(False)
+    def _update_time(self):
+        from datetime import datetime
+        self.time_var.set(datetime.now().strftime("%d %b %Y  |  %H:%M:%S"))
+        self.root.after(1000, self._update_time)
 
-        tk.Label(self.db_status, text="🗄  Database: Connected",
+    def _build_status_bar(self):
+        status = tk.Frame(self.root, bg=COLORS["success"], height=26)
+        status.pack(fill=tk.X)
+        status.pack_propagate(False)
+        tk.Label(status, text="Database: Connected",
                  font=("Segoe UI", 9, "bold"),
-                 bg=COLORS["success"], fg="white").pack(
-                     side=tk.LEFT, padx=14)
-
+                 bg=COLORS["success"], fg="white").pack(side=tk.LEFT, padx=14)
         self.count_var = tk.StringVar(value="Total: 0 boxes")
-        tk.Label(self.db_status, textvariable=self.count_var,
+        tk.Label(status, textvariable=self.count_var,
                  font=("Segoe UI", 9),
-                 bg=COLORS["success"], fg="white").pack(
-                     side=tk.RIGHT, padx=14)
+                 bg=COLORS["success"], fg="white").pack(side=tk.RIGHT, padx=14)
 
-        # Card Status
-        self.card_status = tk.Frame(
-            self.root, bg=COLORS["danger"], height=26
-        )
-        self.card_status.pack(fill=tk.X)
-        self.card_status.pack_propagate(False)
-
-        self.card_dot = tk.Label(
-            self.card_status, text="●",
-            font=("Segoe UI", 11, "bold"),
-            bg=COLORS["danger"], fg="white"
-        )
-        self.card_dot.pack(side=tk.LEFT, padx=(14, 6))
-
-        self.card_var = tk.StringVar(
-            value="No Card Detected — Place card on reader"
-        )
-        self.card_lbl = tk.Label(
-            self.card_status, textvariable=self.card_var,
-            font=("Segoe UI", 9, "bold"),
-            bg=COLORS["danger"], fg="white"
-        )
-        self.card_lbl.pack(side=tk.LEFT)
-
-        self.atr_var = tk.StringVar(value="ATR: --")
-        self.atr_lbl = tk.Label(
-            self.card_status, textvariable=self.atr_var,
-            font=("Consolas", 8),
-            bg=COLORS["danger"], fg="white"
-        )
-        self.atr_lbl.pack(side=tk.RIGHT, padx=14)
-
-    # ── Left Panel: Box List ──────────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # PANEL 1: ALL BOXES (LEFT)
+    # ═══════════════════════════════════════════════════════
 
     def _build_box_list(self, parent):
-        left_frame = tk.LabelFrame(
-            parent,
-            text="  📋  ALL BOXES (Database)  ",
+        list_container = tk.Frame(parent, bg=COLORS["bg"], width=620)
+        list_container.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 5))
+        list_container.pack_propagate(False)
+
+        frame = tk.LabelFrame(list_container, text="  ALL BOXES  ",
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg"], fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH,
-                        expand=True, padx=(0, 5))
+            bd=1, relief=tk.SOLID)
+        frame.pack(fill=tk.BOTH, expand=True)
 
-        # Filter bar
-        filter_frame = tk.Frame(left_frame, bg=COLORS["bg"])
-        filter_frame.pack(fill=tk.X, padx=8, pady=8)
+        inner = tk.Frame(frame, bg=COLORS["bg_card"])
+        inner.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
         # Search
-        tk.Label(filter_frame, text="🔍",
-                 font=("Segoe UI", 11),
-                 bg=COLORS["bg"]).pack(side=tk.LEFT, padx=(0, 4))
-
+        search_frame = tk.Frame(inner, bg=COLORS["bg_card"])
+        search_frame.pack(fill=tk.X, padx=8, pady=8)
+        tk.Label(search_frame, text="Search:",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=COLORS["bg_card"]).pack(side=tk.LEFT, padx=(0, 6))
         self.search_var = tk.StringVar()
         self.search_var.trace("w", lambda *a: self._filter_boxes())
-        tk.Entry(filter_frame, textvariable=self.search_var,
-                 font=("Segoe UI", 10), relief=tk.SOLID,
-                 bd=1, highlightbackground=COLORS["border"],
-                 highlightthickness=1).pack(
-                     side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Entry(search_frame, textvariable=self.search_var,
+                 font=("Segoe UI", 10), relief=tk.SOLID, bd=1,
+                 highlightthickness=1,
+                 highlightbackground=COLORS["input_border"],
+                 highlightcolor=COLORS["primary"]
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=3)
 
-        # Container filter
-        filter_frame2 = tk.Frame(left_frame, bg=COLORS["bg"])
-        filter_frame2.pack(fill=tk.X, padx=8, pady=(0, 8))
+        # Shed Filter
+        shed_filter_frame = tk.Frame(inner, bg=COLORS["bg_card"])
+        shed_filter_frame.pack(fill=tk.X, padx=8, pady=(0, 4))
+        tk.Label(shed_filter_frame, text="Shed:",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=COLORS["bg_card"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.shed_filter_combo = ttk.Combobox(shed_filter_frame, state="readonly",
+                                                font=("Segoe UI", 9))
+        self.shed_filter_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.shed_filter_combo.bind("<<ComboboxSelected>>",
+                                      lambda e: self._filter_boxes())
 
-        tk.Label(filter_frame2, text="Filter by Container:",
-                 font=("Segoe UI", 9),
-                 bg=COLORS["bg"],
-                 fg=COLORS["text"]).pack(side=tk.LEFT, padx=(0, 6))
-
-        self.filter_combo = ttk.Combobox(
-            filter_frame2, state="readonly",
-            font=("Segoe UI", 9), width=18
-        )
+        # Container Filter
+        cont_filter_frame = tk.Frame(inner, bg=COLORS["bg_card"])
+        cont_filter_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        tk.Label(cont_filter_frame, text="Container:",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=COLORS["bg_card"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.filter_combo = ttk.Combobox(cont_filter_frame, state="readonly",
+                                          font=("Segoe UI", 9))
         self.filter_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.filter_combo.bind("<<ComboboxSelected>>",
                                 lambda e: self._filter_boxes())
 
         # Table
-        tree_frame = tk.Frame(left_frame, bg=COLORS["white"])
-        tree_frame.pack(fill=tk.BOTH, expand=True,
-                        padx=8, pady=(0, 8))
+        tf = tk.Frame(inner, bg=COLORS["bg_card"])
+        tf.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        cols = ("uid", "container", "item", "qty", "unit",
-                "condition", "batch")
-        self.tree = ttk.Treeview(
-            tree_frame, columns=cols,
-            show="headings", style="Custom.Treeview"
-        )
+        cols = ("uid", "shed", "container", "item", "qty", "unit", "status")
+        self.tree = ttk.Treeview(tf, columns=cols,
+            show="headings", style="Clean.Treeview")
 
-        self.tree.heading("uid",       text="Box UID")
+        self.tree.heading("uid", text="Box UID")
+        self.tree.heading("shed", text="Shed")
         self.tree.heading("container", text="Container")
-        self.tree.heading("item",      text="Item")
-        self.tree.heading("qty",       text="Qty")
-        self.tree.heading("unit",      text="Unit")
-        self.tree.heading("condition", text="Condition")
-        self.tree.heading("batch",     text="Batch")
+        self.tree.heading("item", text="Item")
+        self.tree.heading("qty", text="Qty")
+        self.tree.heading("unit", text="Unit")
+        self.tree.heading("status", text="Status")
 
-        self.tree.column("uid",       width=90,  anchor="w")
-        self.tree.column("container", width=100, anchor="w")
-        self.tree.column("item",      width=80,  anchor="w")
-        self.tree.column("qty",       width=50,  anchor="center")
-        self.tree.column("unit",      width=50,  anchor="center")
-        self.tree.column("condition", width=70,  anchor="center")
-        self.tree.column("batch",     width=110, anchor="w")
+        self.tree.column("uid", width=155, anchor="center", stretch=False)
+        self.tree.column("shed", width=55, anchor="center", stretch=False)
+        self.tree.column("container", width=75, anchor="center", stretch=False)
+        self.tree.column("item", width=80, anchor="center", stretch=False)
+        self.tree.column("qty", width=60, anchor="center", stretch=False)
+        self.tree.column("unit", width=50, anchor="center", stretch=False)
+        self.tree.column("status", width=95, anchor="center", stretch=True)
 
-        sb = ttk.Scrollbar(tree_frame, orient="vertical",
-                            command=self.tree.yview)
+        sb = ttk.Scrollbar(tf, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
-
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        self.tree.tag_configure("odd", background=COLORS["white"])
-        self.tree.tag_configure("even", background=COLORS["row_alt"])
-
-    # ── Middle Panel: Form ────────────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # PANEL 2: BOX DETAILS FORM (MIDDLE)
+    # ═══════════════════════════════════════════════════════
 
     def _build_form_panel(self, parent):
-        mid_frame = tk.Frame(parent, bg=COLORS["bg"], width=380)
+        mid_frame = tk.Frame(parent, bg=COLORS["bg"], width=360)
         mid_frame.pack(side=tk.LEFT, fill=tk.BOTH, padx=5)
         mid_frame.pack_propagate(False)
 
-        # Form box
-        form_box = tk.LabelFrame(
-            mid_frame,
-            text="  ➕  BOX DETAILS  ",
+        # FORM
+        form_box = tk.LabelFrame(mid_frame,
+            text="  BOX DETAILS  ",
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg"], fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
-        form_box.pack(fill=tk.X, pady=(0, 6))
+            bd=1, relief=tk.SOLID)
+        form_box.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
 
-        form_inner = tk.Frame(form_box, bg=COLORS["white"])
-        form_inner.pack(fill=tk.X, padx=4, pady=4)
+        form_inner = tk.Frame(form_box, bg=COLORS["bg_card"])
+        form_inner.pack(fill=tk.X, padx=2, pady=2)
         form_inner.columnconfigure(1, weight=1)
 
-        self.fields = {}
-
-        # Row 0: Box UID
+        # Box UID
         self._add_field(form_inner, 0, "Box UID:", "box_uid")
 
-        # Row 1: Container dropdown
+        # Container
         tk.Label(form_inner, text="Container:",
-                 font=("Segoe UI", 9),
-                 bg=COLORS["white"], fg=COLORS["text"],
-                 anchor="w").grid(row=1, column=0,
-                                   sticky="w", padx=10, pady=5)
-
-        self.container_combo = ttk.Combobox(
-            form_inner, state="readonly",
-            font=("Segoe UI", 9)
-        )
-        self.container_combo.grid(row=1, column=1, sticky="ew",
-                                    padx=10, pady=5)
-        self.container_combo.bind(
-            "<<ComboboxSelected>>",
-            lambda e: self._on_container_select()
-        )
+                font=("Segoe UI", 10),
+                bg=COLORS["bg_card"], fg=COLORS["text"],
+                anchor="w").grid(row=1, column=0, sticky="w", padx=8, pady=3)
+        self.container_combo = ttk.Combobox(form_inner, state="readonly",
+                                            font=("Segoe UI", 10))
+        self.container_combo.grid(row=1, column=1, sticky="ew", padx=8, pady=3)
+        self.container_combo.bind("<<ComboboxSelected>>",
+                                    lambda e: self._on_container_select())
         self.fields["container_id"] = self.container_combo
 
-        # Row 2: Item Name (auto-filled from container)
-        tk.Label(form_inner, text="Item Name:",
-                 font=("Segoe UI", 9),
-                 bg=COLORS["white"], fg=COLORS["text"],
-                 anchor="w").grid(row=2, column=0,
-                                   sticky="w", padx=10, pady=5)
+        # Item (auto)
+        tk.Label(form_inner, text="Item:",
+                font=("Segoe UI", 10),
+                bg=COLORS["bg_card"], fg=COLORS["text"],
+                anchor="w").grid(row=2, column=0, sticky="w", padx=8, pady=3)
+        self.item_label = tk.Label(form_inner, text="(select container)",
+                                    font=("Segoe UI", 10, "bold"),
+                                    bg=COLORS["bg_card"],
+                                    fg=COLORS["text_muted"],
+                                    anchor="w")
+        self.item_label.grid(row=2, column=1, sticky="ew", padx=8, pady=3)
 
-        self.item_label = tk.Label(
-            form_inner, text="(select container)",
-            font=("Segoe UI", 10, "bold"),
-            bg=COLORS["white"],
-            fg=COLORS["info"],
-            anchor="w"
-        )
-        self.item_label.grid(row=2, column=1, sticky="ew",
-                              padx=10, pady=5)
-
-        # Row 3: Quantity
+        # Quantity
         self._add_field(form_inner, 3, "Quantity:", "quantity")
 
-        # Row 4: Unit
+        # Unit
         tk.Label(form_inner, text="Unit:",
-                 font=("Segoe UI", 9),
-                 bg=COLORS["white"], fg=COLORS["text"],
-                 anchor="w").grid(row=4, column=0,
-                                   sticky="w", padx=10, pady=5)
-
-        self.unit_combo = ttk.Combobox(
-            form_inner,
-            values=["PCS", "KG", "LTR", "MTR", "BOX", "SET"],
-            state="readonly", font=("Segoe UI", 9)
-        )
+                font=("Segoe UI", 10),
+                bg=COLORS["bg_card"], fg=COLORS["text"],
+                anchor="w").grid(row=4, column=0, sticky="w", padx=8, pady=3)
+        self.unit_combo = ttk.Combobox(form_inner,
+            values=["PCS", "KG", "LTR", "MTR", "PAIR", "BOX", "SET"],
+            state="readonly", font=("Segoe UI", 10))
         self.unit_combo.set("PCS")
-        self.unit_combo.grid(row=4, column=1, sticky="ew",
-                              padx=10, pady=5)
+        self.unit_combo.grid(row=4, column=1, sticky="ew", padx=8, pady=3)
         self.fields["unit"] = self.unit_combo
 
-        # Row 5: Condition
+        # Condition
         tk.Label(form_inner, text="Condition:",
-                 font=("Segoe UI", 9),
-                 bg=COLORS["white"], fg=COLORS["text"],
-                 anchor="w").grid(row=5, column=0,
-                                   sticky="w", padx=10, pady=5)
-
-        self.condition_combo = ttk.Combobox(
-            form_inner,
+                font=("Segoe UI", 10),
+                bg=COLORS["bg_card"], fg=COLORS["text"],
+                anchor="w").grid(row=5, column=0, sticky="w", padx=8, pady=3)
+        self.condition_combo = ttk.Combobox(form_inner,
             values=["GOOD", "DAMAGED", "EXPIRED", "SEALED"],
-            state="readonly", font=("Segoe UI", 9)
-        )
+            state="readonly", font=("Segoe UI", 10))
         self.condition_combo.set("GOOD")
-        self.condition_combo.grid(row=5, column=1, sticky="ew",
-                                    padx=10, pady=5)
+        self.condition_combo.grid(row=5, column=1, sticky="ew", padx=8, pady=3)
         self.fields["condition"] = self.condition_combo
 
-        # Row 6: Batch Number
-        self._add_field(form_inner, 6, "Batch Number:", "batch_number")
+        # Status
+        tk.Label(form_inner, text="Status:",
+                font=("Segoe UI", 10),
+                bg=COLORS["bg_card"], fg=COLORS["text"],
+                anchor="w").grid(row=6, column=0, sticky="w", padx=8, pady=3)
+        self.status_combo = ttk.Combobox(form_inner,
+            values=["IN_STOCK", "ALLOCATED", "DISPATCHED", "RETURNED"],
+            state="readonly", font=("Segoe UI", 10))
+        self.status_combo.set("IN_STOCK")
+        self.status_combo.grid(row=6, column=1, sticky="ew", padx=8, pady=3)
+        self.fields["status"] = self.status_combo
 
-        # Help text
-        tk.Label(form_inner,
-                 text="💡 Note: Box item is determined by\n"
-                      "   the selected container's item type.",
-                 font=("Segoe UI", 8, "italic"),
-                 bg=COLORS["white"],
-                 fg=COLORS["muted"],
-                 justify="left").grid(
-                     row=7, column=0, columnspan=2,
-                     sticky="w", padx=10, pady=(8, 6))
+        # Batch
+        self._add_field(form_inner, 7, "Batch No:", "batch_number")
+        
+        # UHF Tag EPC
+        self._add_field(form_inner, 8, "UHF Tag:", "uhf_tag_epc")
 
-        # Database Actions
-        db_box = tk.LabelFrame(
-            mid_frame,
-            text="  🗄  DATABASE ACTIONS  ",
+        # ACTIONS
+        db_box = tk.LabelFrame(mid_frame, text="  ACTIONS  ",
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg"], fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
-        db_box.pack(fill=tk.X, pady=(0, 6))
+            bd=1, relief=tk.SOLID)
+        db_box.pack(side=tk.TOP, fill=tk.X)
 
-        db_inner = tk.Frame(db_box, bg=COLORS["white"])
-        db_inner.pack(fill=tk.X, padx=6, pady=6)
+        db_inner = tk.Frame(db_box, bg=COLORS["bg_card"])
+        db_inner.pack(fill=tk.X, padx=2, pady=2)
 
-        db_actions = [
-            ("➕  ADD BOX TO DATABASE",
-             COLORS["success"], self._add_box),
-            ("✏  UPDATE SELECTED",
-             COLORS["info"], self._update_box),
-            ("🗑  DELETE SELECTED",
-             COLORS["danger"], self._delete_box),
-            ("🔄  REFRESH",
-             COLORS["warning"], self._load_boxes),
-            ("🧹  CLEAR FORM",
-             COLORS["muted"], self._clear_form),
+        actions = [
+            ("ADD BOX", COLORS["success"], self._add_box),
+            ("UPDATE SELECTED", COLORS["info"], self._update_box),
+            ("DELETE SELECTED", COLORS["danger"], self._delete_box),
+            ("REFRESH", COLORS["warning"], self._load_boxes),
+            ("CLEAR FORM", COLORS["text_muted"], self._clear_form),
         ]
 
-        for text, color, cmd in db_actions:
+        for text, color, cmd in actions:
             tk.Button(db_inner, text=text, command=cmd,
-                       font=("Segoe UI", 9, "bold"),
-                       bg=color, fg="white",
-                       relief=tk.FLAT, bd=0,
-                       pady=8, cursor="hand2",
-                       activebackground=COLORS["dark"],
-                       activeforeground="white").pack(
-                           fill=tk.X, pady=2)
+                font=("Segoe UI", 10, "bold"),
+                bg=color, fg="white",
+                relief=tk.FLAT, bd=0,
+                pady=4, cursor="hand2",
+                activebackground=COLORS["primary_dark"],
+                activeforeground="white").pack(fill=tk.X, padx=6, pady=1)
 
     def _add_field(self, parent, row, label, key):
         tk.Label(parent, text=label,
-                 font=("Segoe UI", 9),
-                 bg=COLORS["white"], fg=COLORS["text"],
-                 anchor="w").grid(row=row, column=0,
-                                   sticky="w", padx=10, pady=5)
-
+            font=("Segoe UI", 10),
+            bg=COLORS["bg_card"], fg=COLORS["text"],
+            anchor="w").grid(row=row, column=0, sticky="w", padx=8, pady=3)
         entry = tk.Entry(parent, font=("Segoe UI", 10),
-                          relief=tk.SOLID, bd=1,
-                          highlightbackground=COLORS["border"],
-                          highlightthickness=1)
-        entry.grid(row=row, column=1, sticky="ew",
-                   padx=10, pady=5)
+            relief=tk.SOLID, bd=1,
+            highlightthickness=1,
+            highlightbackground=COLORS["input_border"],
+            highlightcolor=COLORS["primary"])
+        entry.grid(row=row, column=1, sticky="ew", padx=8, pady=3, ipady=3)
         self.fields[key] = entry
 
-    # ── Right Panel: Card + Log ───────────────────────────
+    # ═══════════════════════════════════════════════════════
+    # PANEL 3: UHF + INFO + LOG (RIGHT)
+    # ═══════════════════════════════════════════════════════
 
-    def _build_card_panel(self, parent):
-        right_frame = tk.Frame(parent, bg=COLORS["bg"], width=380)
-        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0))
+    def _build_actions_panel(self, parent):
+        right_frame = tk.Frame(parent, bg=COLORS["bg"])
+        right_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
         right_frame.pack_propagate(False)
 
-        # Card Operations
-        card_box = tk.LabelFrame(
-            right_frame,
-            text="  💳  MIFARE CARD OPERATIONS  ",
+        # UHF OPERATIONS
+        uhf_box = tk.LabelFrame(right_frame,
+            text="  UHF TAG OPERATIONS  ",
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg"], fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
-        card_box.pack(fill=tk.X, pady=(0, 6))
+            bd=1, relief=tk.SOLID)
+        uhf_box.pack(fill=tk.X, pady=(0, 6))
 
-        card_inner = tk.Frame(card_box, bg=COLORS["white"])
-        card_inner.pack(fill=tk.X, padx=6, pady=6)
+        uhf_inner = tk.Frame(uhf_box, bg=COLORS["bg_card"])
+        uhf_inner.pack(fill=tk.X, padx=2, pady=2)
 
-        tk.Label(
-            card_inner,
-            text="💡 Card pe sirf Box UID write hota hai.\n"
-                 "   Item, qty, container info DB se aati hai.",
-            font=("Segoe UI", 8),
-            bg=COLORS["white"], fg=COLORS["muted"],
-            justify="left"
-        ).pack(anchor="w", padx=8, pady=(4, 8))
+        tk.Label(uhf_inner,
+            text="Each box has a UHF tag with SKU info.\n"
+                 "Tags contain: SKU, Item, Sequence #",
+            font=("Segoe UI", 9, "italic"),
+            bg=COLORS["bg_card"], fg=COLORS["text_muted"],
+            justify="left", wraplength=380
+        ).pack(anchor="w", padx=10, pady=(10, 10))
 
-        card_actions = [
-            ("💾  WRITE UID TO CARD",
-             COLORS["success"], self._write_to_card),
-            ("📖  READ FROM CARD",
-             COLORS["info"], self._read_from_card),
-            ("🔍  VERIFY CARD ↔ DB",
-             COLORS["warning"], self._verify_card_db),
-        ]
+        tk.Button(uhf_inner,
+            text="OPEN UHF WRITER",
+            command=self._launch_uhf_writer,
+            font=("Segoe UI", 12, "bold"),
+            bg=COLORS["primary"], fg="white",
+            relief=tk.FLAT, bd=0,
+            pady=12, cursor="hand2",
+            activebackground=COLORS["primary_dark"],
+            activeforeground="white").pack(fill=tk.X, padx=10, pady=(0, 10))
 
-        for text, color, cmd in card_actions:
-            tk.Button(card_inner, text=text, command=cmd,
-                       font=("Segoe UI", 10, "bold"),
-                       bg=color, fg="white",
-                       relief=tk.FLAT, bd=0,
-                       pady=10, cursor="hand2",
-                       activebackground=COLORS["dark"],
-                       activeforeground="white").pack(
-                           fill=tk.X, pady=3)
-
-        # Activity Log
-        log_box = tk.LabelFrame(
-            right_frame,
-            text="  📋  ACTIVITY LOG  ",
+        # BOX INFO
+        info_box = tk.LabelFrame(right_frame,
+            text="  BOX INFO  ",
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg"], fg=COLORS["primary"],
-            bd=1, relief=tk.GROOVE
-        )
+            bd=1, relief=tk.SOLID)
+        info_box.pack(fill=tk.X, pady=(0, 6))
+
+        info_inner = tk.Frame(info_box, bg=COLORS["bg_card"])
+        info_inner.pack(fill=tk.X, padx=2, pady=2)
+
+        self.box_info_var = tk.StringVar(value="Select a box to view info")
+        tk.Label(info_inner, textvariable=self.box_info_var,
+            font=("Segoe UI", 9, "italic"),
+            bg=COLORS["bg_card"], fg=COLORS["text_muted"],
+            justify="left", wraplength=380
+        ).pack(anchor="w", padx=10, pady=10)
+
+        # ACTIVITY LOG
+        log_box = tk.LabelFrame(right_frame,
+            text="  ACTIVITY LOG  ",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLORS["bg"], fg=COLORS["primary"],
+            bd=1, relief=tk.SOLID)
         log_box.pack(fill=tk.BOTH, expand=True)
 
-        log_inner = tk.Frame(log_box, bg=COLORS["white"])
-        log_inner.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        log_inner = tk.Frame(log_box, bg="#212121")
+        log_inner.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        self.log_text = tk.Text(
-            log_inner, font=("Consolas", 9),
-            bg="#0d1117", fg="#4ade80",
-            relief=tk.FLAT, bd=0, wrap=tk.WORD,
-            insertbackground="white"
-        )
-        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
+        self.log_text = tk.Text(log_inner, font=("Consolas", 9),
+            bg="#212121", fg="#4ade80",
+            relief=tk.FLAT, bd=0, wrap=tk.WORD)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
         sb = ttk.Scrollbar(log_inner, command=self.log_text.yview)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.config(yscrollcommand=sb.set)
 
+        self._log("Box Management started", "ok")
+
     def _build_footer(self):
-        footer = tk.Frame(self.root, bg=COLORS["dark"], height=24)
+        footer = tk.Frame(self.root, bg=COLORS["primary"], height=26)
         footer.pack(fill=tk.X, side=tk.BOTTOM)
         footer.pack_propagate(False)
-        tk.Label(footer,
-                 text="© 2025 Indian Army  |  Box Tag Module",
-                 font=("Segoe UI", 8),
-                 bg=COLORS["dark"],
-                 fg=COLORS["muted"]).pack(side=tk.LEFT, padx=12, pady=4)
-        tk.Label(footer,
-                 text="DB: PostgreSQL  |  Card: MIFARE 1K",
-                 font=("Segoe UI", 8),
-                 bg=COLORS["dark"],
-                 fg=COLORS["muted"]).pack(side=tk.RIGHT, padx=12, pady=4)
+        tk.Label(footer, text="© 2025 Indian Army | Box Management",
+            font=("Segoe UI", 8), bg=COLORS["primary"],
+            fg="white").pack(side=tk.LEFT, padx=14, pady=5)
+        tk.Label(footer, text="Database: PostgreSQL",
+            font=("Segoe UI", 8), bg=COLORS["primary"],
+            fg=COLORS["accent"]).pack(side=tk.RIGHT, padx=14, pady=5)
 
     # ═══════════════════════════════════════════════════════
-    # LOGGING
+    # HELPERS
     # ═══════════════════════════════════════════════════════
 
     def _log(self, msg, level="info"):
-        icons = {"info": "ℹ", "ok": "✓", "err": "✗",
-                  "warn": "⚠", "lock": "🔐"}
+        icons = {"info": "ℹ", "ok": "✓", "err": "✗", "warn": "⚠"}
         ts = time.strftime("%H:%M:%S")
         try:
-            self.log_text.insert(
-                tk.END, f"[{ts}] {icons.get(level, '•')} {msg}\n")
+            self.log_text.insert(tk.END, f"[{ts}] {icons.get(level, '•')} {msg}\n")
             self.log_text.see(tk.END)
         except Exception:
             pass
 
     # ═══════════════════════════════════════════════════════
-    # CARD POLLING
+    # UHF WRITER LAUNCHER
     # ═══════════════════════════════════════════════════════
 
-    def _poll_card(self):
-        present = self.mifare.connect()
-        if present and not self.card_present:
-            atr = self.mifare.get_atr()
-            self.atr_var.set(f"ATR: {atr}")
-            self._set_card_status(
-                "Card Detected — Ready", COLORS["success"])
-            self._log("Card detected on reader", "ok")
-            self.card_present = True
-        elif not present and self.card_present:
-            self.atr_var.set("ATR: --")
-            self._set_card_status(
-                "No Card Detected — Place card on reader",
-                COLORS["danger"])
-            self._log("Card removed", "warn")
-            self.card_present = False
-        self.mifare.disconnect()
-        self.root.after(1500, self._poll_card)
-
-    def _set_card_status(self, text, color):
-        self.card_var.set(text)
-        for w in [self.card_status, self.card_dot,
-                  self.card_lbl, self.atr_lbl]:
-            try:
-                w.configure(bg=color)
-            except Exception:
-                pass
+    def _launch_uhf_writer(self):
+        uhf_app = os.path.join(BASE, 'uhf_writer_app.py')
+        
+        if not os.path.exists(uhf_app):
+            messagebox.showerror("Not Found",
+                f"UHF Writer app not found at:\n{uhf_app}")
+            return
+        
+        try:
+            subprocess.Popen([sys.executable, uhf_app])
+            self._log("Launched UHF Writer", "ok")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to launch: {e}")
 
     # ═══════════════════════════════════════════════════════
     # DATABASE OPERATIONS
     # ═══════════════════════════════════════════════════════
 
+    def _load_sheds_filter(self):
+        """Load sheds for filter dropdown."""
+        sheds = self.db.get_all_sheds()
+        self.shed_filter_map = {}
+        values = ["All Sheds"]
+        for s in sheds:
+            display = f"{s['shed_id']} - {s['shed_name']}"
+            values.append(display)
+            self.shed_filter_map[display] = s['shed_id']
+        self.shed_filter_combo['values'] = values
+        self.shed_filter_combo.set("All Sheds")
+
     def _load_containers_dropdown(self):
-        """Load containers into dropdowns."""
         containers = self.db.get_all_containers()
         self.container_map = {}
-        self.container_info = {}  # sku_id -> full container data
-
+        self.container_info = {}
         values = ["-- Select Container --"]
         filter_values = ["All Containers"]
-
+        
         for c in containers:
-            display = f"{c['sku_id']} ({c['item_name']})"
+            display = f"{c['container_id']} ({c['item_name']})"
             values.append(display)
             filter_values.append(display)
-            self.container_map[display] = c['sku_id']
-            self.container_info[c['sku_id']] = c
-
+            self.container_map[display] = c['container_id']
+            self.container_info[c['container_id']] = c
+        
         self.container_combo['values'] = values
         if values:
             self.container_combo.set(values[0])
-
         self.filter_combo['values'] = filter_values
         self.filter_combo.set(filter_values[0])
 
     def _on_container_select(self):
-        """Update item label when container selected."""
         selected = self.container_combo.get()
-        sku_id = self.container_map.get(selected)
-
-        if sku_id and sku_id in self.container_info:
-            container = self.container_info[sku_id]
+        container_id = self.container_map.get(selected)
+        if container_id and container_id in self.container_info:
+            container = self.container_info[container_id]
+            shed_id = container.get('shed_id', '?')
             self.item_label.configure(
-                text=f"{container['item_name']} "
-                     f"(from {container['container_name']})",
-                fg=COLORS["info"]
-            )
+                text=f"{container['item_name']} (Shed: {shed_id})",
+                fg=COLORS["primary"])
         else:
-            self.item_label.configure(
-                text="(select container)",
-                fg=COLORS["muted"]
-            )
+            self.item_label.configure(text="(select container)",
+                                       fg=COLORS["text_muted"])
 
     def _load_boxes(self):
-        """Load all boxes from database."""
         for item in self.tree.get_children():
             self.tree.delete(item)
-
+        
         boxes = self.db.get_all_boxes()
         self.all_boxes = boxes
-
-        for i, b in enumerate(boxes):
-            tag = "even" if i % 2 == 0 else "odd"
-            self.tree.insert(
-                "", tk.END,
-                values=(
-                    b['box_uid'],
-                    b['container_id'],
-                    b.get('item_name', '-'),
-                    b['quantity'],
-                    b['unit'],
-                    b['condition'],
-                    b.get('batch_number', '-')
-                ),
-                tags=(tag,)
-            )
-
+        
+        for b in boxes:
+            self.tree.insert("", tk.END, values=(
+                b['box_uid'],
+                b.get('shed_id', '-') or '-',
+                b['container_id'],
+                b.get('item_name', '-'),
+                b['quantity'],
+                b['unit'],
+                b.get('status', 'IN_STOCK')
+            ))
+        
         self.count_var.set(f"Total: {len(boxes)} boxes")
-        self._log(f"Loaded {len(boxes)} boxes from DB", "ok")
+        self._log(f"Loaded {len(boxes)} boxes", "ok")
 
     def _filter_boxes(self):
-        """Filter boxes by search and container."""
         search = self.search_var.get().lower().strip()
+        shed_filter = self.shed_filter_combo.get()
         container_filter = self.filter_combo.get()
-
-        # Clear table
+        
         for item in self.tree.get_children():
             self.tree.delete(item)
-
-        # Filter
+        
         filtered = self.all_boxes
-
-        # Container filter
+        
+        # Filter by shed
+        if shed_filter and shed_filter != "All Sheds":
+            shed_id = self.shed_filter_map.get(shed_filter)
+            if shed_id:
+                filtered = [b for b in filtered if b.get('shed_id') == shed_id]
+        
+        # Filter by container
         if container_filter and container_filter != "All Containers":
-            sku = self.container_map.get(container_filter)
-            if sku:
-                filtered = [b for b in filtered
-                            if b['container_id'] == sku]
-
-        # Search filter
+            container_id = self.container_map.get(container_filter)
+            if container_id:
+                filtered = [b for b in filtered if b['container_id'] == container_id]
+        
+        # Filter by search
         if search:
-            filtered = [
-                b for b in filtered
+            filtered = [b for b in filtered
                 if search in b['box_uid'].lower()
                 or search in b['container_id'].lower()
-                or search in b.get('item_name', '').lower()
-                or search in b.get('batch_number', '').lower()
-            ]
-
-        # Re-insert
-        for i, b in enumerate(filtered):
-            tag = "even" if i % 2 == 0 else "odd"
-            self.tree.insert(
-                "", tk.END,
-                values=(
-                    b['box_uid'], b['container_id'],
-                    b.get('item_name', '-'), b['quantity'],
-                    b['unit'], b['condition'],
-                    b.get('batch_number', '-')
-                ),
-                tags=(tag,)
-            )
-
-        self.count_var.set(
-            f"Showing: {len(filtered)} of "
-            f"{len(self.all_boxes)} boxes"
-        )
+                or search in (b.get('item_name', '') or '').lower()
+                or search in (b.get('uhf_tag_epc', '') or '').lower()]
+        
+        for b in filtered:
+            self.tree.insert("", tk.END, values=(
+                b['box_uid'],
+                b.get('shed_id', '-') or '-',
+                b['container_id'],
+                b.get('item_name', '-'),
+                b['quantity'],
+                b['unit'],
+                b.get('status', 'IN_STOCK')
+            ))
+        
+        self.count_var.set(f"Showing: {len(filtered)} of {len(self.all_boxes)}")
 
     def _on_select(self, event):
-        """Fill form when row clicked."""
         selection = self.tree.selection()
         if not selection:
             return
-
+        
         values = self.tree.item(selection[0])['values']
-
         self._clear_form(refresh=False)
-
-        self.fields['box_uid'].insert(0, values[0])
-
-        # Set container
-        container_id = values[1]
-        for display, sku in self.container_map.items():
-            if sku == container_id:
+        
+        box_uid = str(values[0])
+        self.fields['box_uid'].insert(0, box_uid)
+        
+        container_id = str(values[2])
+        for display, cid in self.container_map.items():
+            if cid == container_id:
                 self.container_combo.set(display)
                 self._on_container_select()
                 break
-
-        self.fields['quantity'].insert(0, values[3])
-        self.unit_combo.set(values[4])
-        self.condition_combo.set(values[5])
-
-        if values[6] and values[6] != '-':
-            self.fields['batch_number'].insert(0, values[6])
-
-        self.selected_box = values[0]
+        
+        self.fields['quantity'].insert(0, values[4])
+        self.unit_combo.set(values[5])
+        self.status_combo.set(values[6])
+        
+        # Get full box details
+        box = self.db.get_box_by_uid(box_uid)
+        if box:
+            self.condition_combo.set(box.get('condition', 'GOOD'))
+            
+            if box.get('batch_number'):
+                self.fields['batch_number'].insert(0, box['batch_number'])
+            
+            if box.get('uhf_tag_epc'):
+                self.fields['uhf_tag_epc'].insert(0, box['uhf_tag_epc'])
+            
+            # Show box info
+            info_text = (
+                f"📦 Box: {box_uid}\n"
+                f"🏚️ Shed: {box.get('shed_id', '?')}\n"
+                f"📋 Container: {box.get('container_id', '?')}\n"
+                f"🎯 Item: {box.get('item_name', '?')} × {box['quantity']} {box.get('unit', 'PCS')}\n"
+                f"📡 UHF: {box.get('uhf_tag_epc', '(none)')}\n"
+                f"🔵 Status: {box.get('status', 'IN_STOCK')}"
+            )
+            self.box_info_var.set(info_text)
+        
+        self.selected_box = box_uid
         self.fields['box_uid'].configure(state="readonly")
-
-        self._log(f"Selected box: {values[0]}", "info")
+        self._log(f"Selected: {box_uid}", "info")
 
     def _get_container_id(self):
-        """Get container_id from dropdown."""
-        selected = self.container_combo.get()
-        return self.container_map.get(selected, "")
-
-    def _update_container_totals(self, container_id):
-        """Recalculate container's total_boxes and total_quantity."""
-        boxes = self.db.get_boxes_by_container(container_id)
-        total_boxes = len(boxes)
-        total_qty = sum(b['quantity'] for b in boxes)
-
-        self.db.update_container_quantity(
-            container_id, total_boxes, total_qty
-        )
-        self._log(
-            f"Container {container_id}: {total_boxes} boxes, "
-            f"{total_qty} units", "ok"
-        )
+        return self.container_map.get(self.container_combo.get(), "")
 
     def _add_box(self):
-        """Add new box to database."""
-        uid          = self.fields['box_uid'].get().strip()
+        uid = self.fields['box_uid'].get().strip()
         container_id = self._get_container_id()
-        qty          = self.fields['quantity'].get().strip()
-        unit         = self.unit_combo.get()
-        condition    = self.condition_combo.get()
-        batch        = self.fields['batch_number'].get().strip()
+        qty = self.fields['quantity'].get().strip()
+        unit = self.unit_combo.get()
+        condition = self.condition_combo.get()
+        batch = self.fields['batch_number'].get().strip()
+        uhf_epc = self.fields['uhf_tag_epc'].get().strip()
 
-        # Validation
-        if not uid:
-            messagebox.showwarning("Required", "Box UID is required!")
-            self.fields['box_uid'].focus()
+        if not uid or not container_id:
+            messagebox.showwarning("Required", "Box UID and Container are required!")
             return
-
-        if not container_id:
-            messagebox.showwarning("Required",
-                                    "Please select a Container!")
-            return
-
+        
         try:
             qty = int(qty) if qty else 0
         except ValueError:
-            messagebox.showwarning(
-                "Invalid", "Quantity must be a number!"
-            )
+            messagebox.showwarning("Invalid", "Quantity must be a number!")
             return
-
+        
         if qty <= 0:
-            messagebox.showwarning("Invalid",
-                                    "Quantity must be greater than 0!")
+            messagebox.showwarning("Invalid", "Quantity must be > 0!")
+            return
+        
+        if self.db.get_box_by_uid(uid):
+            messagebox.showerror("Duplicate", f"Box UID '{uid}' exists!")
             return
 
-        # Check duplicate
-        existing = self.db.get_box_by_uid(uid)
-        if existing:
-            messagebox.showerror(
-                "Duplicate",
-                f"Box UID '{uid}' already exists!\n\n"
-                f"Use Update button to modify."
-            )
-            return
-
-        # Insert
-        if self.db.add_box(uid, container_id, qty, unit, batch):
-            # Update condition if not GOOD
+        if self.db.add_box(uid, container_id, qty, unit, batch, uhf_epc or None):
+            # Update extra fields
             if condition != "GOOD":
                 self.db.update_box(uid, condition=condition)
-
-            # Update container totals
-            self._update_container_totals(container_id)
-
-            self._log(f"Box {uid} added to {container_id}", "ok")
-
-            container = self.container_info.get(container_id, {})
-            messagebox.showinfo(
-                "Success",
-                f"✅ Box added to database!\n\n"
-                f"Box UID: {uid}\n"
-                f"Container: {container_id}\n"
-                f"Item: {container.get('item_name', '-')}\n"
-                f"Quantity: {qty} {unit}\n\n"
-                f"💡 Now click 'WRITE UID TO CARD' to\n"
-                f"   program a MIFARE card."
-            )
+            
+            self._log(f"Box {uid} added", "ok")
+            messagebox.showinfo("Success",
+                f"Box added!\n\nUID: {uid}\nContainer: {container_id}\n"
+                f"Qty: {qty} {unit}")
             self._clear_form()
             self._load_boxes()
-            self._load_containers_dropdown()
         else:
-            messagebox.showerror(
-                "Error", "Failed to add box to database!"
-            )
+            messagebox.showerror("Error", "Failed to add box! Check if UHF tag is unique.")
 
     def _update_box(self):
-        """Update selected box."""
         if not self.selected_box:
-            messagebox.showwarning(
-                "No Selection",
-                "Please select a box from the list first!"
-            )
+            messagebox.showwarning("No Selection", "Select a box first!")
             return
-
-        qty       = self.fields['quantity'].get().strip()
-        condition = self.condition_combo.get()
-
+        
         try:
-            qty = int(qty) if qty else 0
+            qty = int(self.fields['quantity'].get() or 0)
         except ValueError:
-            messagebox.showwarning(
-                "Invalid", "Quantity must be a number!"
-            )
+            messagebox.showwarning("Invalid", "Quantity must be a number!")
             return
-
-        if not messagebox.askyesno(
-            "Confirm Update",
-            f"Update box '{self.selected_box}'?"
-        ):
+        
+        if qty <= 0:
+            messagebox.showwarning("Invalid", "Quantity must be > 0!")
             return
-
-        if self.db.update_box(
-            self.selected_box, quantity=qty, condition=condition
-        ):
-            # Get container to update totals
-            box = self.db.get_box_by_uid(self.selected_box)
-            if box:
-                self._update_container_totals(box['container_id'])
-
+        
+        unit = self.unit_combo.get()
+        condition = self.condition_combo.get()
+        status = self.status_combo.get()
+        batch = self.fields['batch_number'].get().strip()
+        uhf_epc = self.fields['uhf_tag_epc'].get().strip()
+        
+        if not messagebox.askyesno("Confirm", f"Update '{self.selected_box}'?"):
+            return
+        
+        if self.db.update_box(self.selected_box,
+                              quantity=qty,
+                              unit=unit,
+                              condition=condition,
+                              status=status,
+                              batch_number=batch,
+                              uhf_tag_epc=uhf_epc or None):
             self._log(f"Box {self.selected_box} updated", "ok")
-            messagebox.showinfo(
-                "Success", "✅ Box updated successfully!"
-            )
+            messagebox.showinfo("Success", "Box updated!")
             self._clear_form()
             self._load_boxes()
-            self._load_containers_dropdown()
-        else:
-            messagebox.showerror(
-                "Error", "Failed to update box!"
-            )
 
     def _delete_box(self):
-        """Delete selected box."""
         if not self.selected_box:
-            messagebox.showwarning(
-                "No Selection",
-                "Please select a box from the list first!"
-            )
+            messagebox.showwarning("No Selection", "Select a box first!")
             return
-
-        # Get container before deletion
-        box = self.db.get_box_by_uid(self.selected_box)
-        container_id = box['container_id'] if box else None
-
-        if not messagebox.askyesno(
-            "Confirm Delete",
-            f"⚠️  Delete box '{self.selected_box}'?\n\n"
-            f"This action cannot be undone!\n\n"
-            f"Container totals will auto-update."
-        ):
+        
+        if not messagebox.askyesno("Confirm Delete",
+            f"Delete box '{self.selected_box}'?\nThis cannot be undone!"):
             return
-
+        
         if self.db.delete_box(self.selected_box):
-            # Update container totals after deletion
-            if container_id:
-                self._update_container_totals(container_id)
-
             self._log(f"Box {self.selected_box} deleted", "warn")
-            messagebox.showinfo(
-                "Success", "✅ Box deleted successfully!"
-            )
+            messagebox.showinfo("Success", "Box deleted!")
             self._clear_form()
             self._load_boxes()
-            self._load_containers_dropdown()
-        else:
-            messagebox.showerror(
-                "Error", "Failed to delete box!"
-            )
 
     def _clear_form(self, refresh=True):
-        """Clear all form fields."""
         for key, widget in self.fields.items():
-            if key in ["unit", "condition", "container_id"]:
+            if key in ["unit", "condition", "container_id", "status"]:
                 continue
             try:
                 widget.configure(state="normal")
                 widget.delete(0, tk.END)
             except Exception:
                 pass
-
+        
         self.unit_combo.set("PCS")
         self.condition_combo.set("GOOD")
-
+        self.status_combo.set("IN_STOCK")
+        
         if self.container_combo['values']:
-            self.container_combo.set(
-                self.container_combo['values'][0]
-            )
-
-        self.item_label.configure(
-            text="(select container)",
-            fg=COLORS["muted"]
-        )
-
+            self.container_combo.set(self.container_combo['values'][0])
+        
+        self.item_label.configure(text="(select container)", fg=COLORS["text_muted"])
+        self.box_info_var.set("Select a box to view info")
+        
         self.selected_box = None
-
-        # Clear tree selection
         for item in self.tree.selection():
             self.tree.selection_remove(item)
-
+        
         if refresh:
             self._log("Form cleared", "info")
 
-    # ═══════════════════════════════════════════════════════
-    # MIFARE CARD OPERATIONS
-    # ═══════════════════════════════════════════════════════
-
-    def _write_to_card(self):
-        """Write Box UID to MIFARE card."""
-        uid = self.fields['box_uid'].get().strip()
-
-        if not uid:
-            messagebox.showwarning(
-                "Required",
-                "Please enter or select a Box UID first!"
-            )
-            return
-
-        # Verify box exists in DB
-        box = self.db.get_box_by_uid(uid)
-        if not box:
-            if not messagebox.askyesno(
-                "Not in Database",
-                f"Box '{uid}' is not in database!\n\n"
-                f"Do you still want to write it to card?"
-            ):
-                return
-
-        # Check card
-        if not self.mifare.connect():
-            messagebox.showerror(
-                "No Card", "Place MIFARE card on reader!"
-            )
-            return
-
-        try:
-            self._log("═" * 36)
-            self._log(f"WRITING Box UID to card: {uid}", "info")
-
-            card = BoxCard()
-            card.box_uid = uid
-            card.write(self.mifare)
-
-            self._log(f"✅ Card programmed with UID: {uid}", "ok")
-
-            # Show success with details
-            info = f"✅ Card programmed successfully!\n\n"
-            info += f"Box UID: {uid}\n"
-            info += f"Card Type: BOX\n\n"
-
-            if box:
-                info += f"🗃 Box Details (from DB):\n"
-                info += f"  Container: {box['container_id']}\n"
-                info += f"  Item:      {box.get('item_name', '-')}\n"
-                info += f"  Quantity:  {box['quantity']} {box['unit']}\n"
-                info += f"  Condition: {box['condition']}\n"
-                info += f"  Batch:     {box.get('batch_number', '-')}"
-
-            messagebox.showinfo("Success", info)
-
-        except Exception as e:
-            self._log(f"Write error: {e}", "err")
-            messagebox.showerror("Write Error", str(e))
-        finally:
-            self.mifare.disconnect()
-
-    def _read_from_card(self):
-        """Read Box UID from card and load DB info."""
-        if not self.mifare.connect():
-            messagebox.showerror(
-                "No Card", "Place MIFARE card on reader!"
-            )
-            return
-
-        try:
-            self._log("═" * 36)
-            self._log("READING box card...", "info")
-
-            card = BoxCard()
-            card.read(self.mifare)
-
-            if not card.box_uid:
-                messagebox.showwarning(
-                    "Empty Card",
-                    "This card has no Box UID written on it!"
-                )
-                return
-
-            self._log(f"Card Box UID: {card.box_uid}", "ok")
-            self._log(f"Card Type: {card.card_type}", "ok")
-
-            # Lookup in database
-            box = self.db.get_box_by_uid(card.box_uid)
-
-            if box:
-                self._log("✅ Box found in database", "ok")
-
-                # Auto-fill form
-                self._clear_form(refresh=False)
-                self.fields['box_uid'].insert(0, box['box_uid'])
-
-                # Set container
-                for display, sku in self.container_map.items():
-                    if sku == box['container_id']:
-                        self.container_combo.set(display)
-                        self._on_container_select()
-                        break
-
-                self.fields['quantity'].insert(0, str(box['quantity']))
-                self.unit_combo.set(box['unit'])
-                self.condition_combo.set(box['condition'])
-
-                if box.get('batch_number'):
-                    self.fields['batch_number'].insert(
-                        0, box['batch_number']
-                    )
-
-                self.selected_box = box['box_uid']
-                self.fields['box_uid'].configure(state="readonly")
-
-                # Show success popup
-                self._show_box_details(box)
-
-            else:
-                self._log(
-                    f"⚠ Box UID '{card.box_uid}' not in DB", "warn"
-                )
-                messagebox.showwarning(
-                    "Not Found",
-                    f"Card Box UID: {card.box_uid}\n\n"
-                    f"❌ Not found in database!\n\n"
-                    f"This card may be orphaned or from\n"
-                    f"another system."
-                )
-
-        except Exception as e:
-            self._log(f"Read error: {e}", "err")
-            messagebox.showerror("Read Error", str(e))
-        finally:
-            self.mifare.disconnect()
-
-    def _verify_card_db(self):
-        """Verify card matches database entry."""
-        if not self.mifare.connect():
-            messagebox.showerror(
-                "No Card", "Place card on reader!"
-            )
-            return
-
-        try:
-            self._log("═" * 36)
-            self._log("VERIFYING box card with database...", "info")
-
-            card = BoxCard()
-            card.read(self.mifare)
-
-            if not card.box_uid:
-                messagebox.showwarning(
-                    "Empty Card", "Card has no Box UID!"
-                )
-                return
-
-            box = self.db.get_box_by_uid(card.box_uid)
-
-            if box:
-                msg = f"✅ VERIFICATION SUCCESSFUL\n\n"
-                msg += f"{'─'*30}\n"
-                msg += f"Card Box UID:  {card.box_uid}\n"
-                msg += f"Card Type:     {card.card_type}\n"
-                msg += f"{'─'*30}\n\n"
-                msg += f"🗃 Database Match:\n"
-                msg += f"  Container:    {box['container_id']}\n"
-                msg += f"  Item:         {box.get('item_name', '-')}\n"
-                msg += f"  Quantity:     {box['quantity']} {box['unit']}\n"
-                msg += f"  Condition:    {box['condition']}\n"
-                msg += f"  Batch:        {box.get('batch_number', '-')}\n"
-                msg += f"  Warehouse:    {box.get('warehouse_name', '-')}"
-
-                self._log("Card verified successfully", "ok")
-                messagebox.showinfo("Verification OK", msg)
-            else:
-                self._log(
-                    f"Card UID not in DB: {card.box_uid}", "err"
-                )
-                messagebox.showerror(
-                    "Verification Failed",
-                    f"❌ Card UID '{card.box_uid}' "
-                    f"NOT found in database!\n\n"
-                    f"This card may be invalid or removed."
-                )
-
-        except Exception as e:
-            self._log(f"Verify error: {e}", "err")
-            messagebox.showerror("Error", str(e))
-        finally:
-            self.mifare.disconnect()
-
-    def _show_box_details(self, box):
-        """Show detailed popup of box info from DB."""
-        popup = tk.Toplevel(self.root)
-        popup.title("Box Details (from Database)")
-        popup.configure(bg=COLORS["bg"])
-        popup.geometry("500x550")
-        popup.grab_set()
-
-        # Header
-        hdr = tk.Frame(popup, bg=COLORS["primary"], height=54)
-        hdr.pack(fill=tk.X)
-        hdr.pack_propagate(False)
-        tk.Label(hdr, text="🗃  BOX VERIFIED",
-                 font=("Segoe UI", 13, "bold"),
-                 bg=COLORS["primary"],
-                 fg="white").pack(pady=13)
-
-        # Status banner
-        stat = tk.Frame(popup, bg=COLORS["success"], height=34)
-        stat.pack(fill=tk.X)
-        stat.pack_propagate(False)
-        tk.Label(stat,
-                 text=f"✓  Box UID matches Database Entry",
-                 font=("Segoe UI", 10, "bold"),
-                 bg=COLORS["success"],
-                 fg="white").pack(pady=7)
-
-        # Body
-        body = tk.Frame(popup, bg=COLORS["bg"])
-        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
-
-        def info_block(title, rows):
-            frm = tk.LabelFrame(
-                body, text=f"  {title}",
-                font=("Segoe UI", 9, "bold"),
-                bg=COLORS["white"],
-                fg=COLORS["primary"],
-                bd=1, relief=tk.GROOVE
-            )
-            frm.pack(fill=tk.X, pady=(0, 6))
-            inner = tk.Frame(frm, bg=COLORS["white"])
-            inner.pack(fill=tk.X, padx=8, pady=6)
-            for lbl, val in rows:
-                row = tk.Frame(inner, bg=COLORS["white"])
-                row.pack(fill=tk.X, pady=2)
-                tk.Label(row, text=f"{lbl}:",
-                         font=("Segoe UI", 9),
-                         bg=COLORS["white"],
-                         fg=COLORS["muted"],
-                         width=15,
-                         anchor="w").pack(side=tk.LEFT)
-                tk.Label(row, text=str(val) if val else "—",
-                         font=("Segoe UI", 9, "bold"),
-                         bg=COLORS["white"],
-                         fg=COLORS["text"]).pack(side=tk.LEFT)
-
-        # Box info
-        info_block("🗃  BOX INFORMATION", [
-            ("Box UID",       box['box_uid']),
-            ("Item Name",     box.get('item_name', '-')),
-            ("Quantity",      f"{box['quantity']} {box['unit']}"),
-            ("Condition",     box['condition']),
-            ("Batch Number",  box.get('batch_number', '-')),
-        ])
-
-        # Container info
-        info_block("📦  PARENT CONTAINER", [
-            ("Container ID",  box['container_id']),
-            ("Container Name", box.get('container_name', '-')),
-        ])
-
-        # Warehouse info (if available)
-        if box.get('warehouse_name'):
-            info_block("🏭  WAREHOUSE LOCATION", [
-                ("Warehouse ID",   box.get('warehouse_id', '-')),
-                ("Warehouse Name", box.get('warehouse_name', '-')),
-            ])
-
-        # Close button
-        tk.Button(body, text="✓  CLOSE",
-                   font=("Segoe UI", 10, "bold"),
-                   bg=COLORS["primary"], fg="white",
-                   relief=tk.FLAT, pady=10,
-                   cursor="hand2",
-                   command=popup.destroy).pack(fill=tk.X, pady=(4, 0))
-
-
-# ═══════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ═══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app  = BoxApp(root)
+    app = BoxApp(root)
     root.mainloop()

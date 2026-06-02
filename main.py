@@ -674,6 +674,29 @@ class MainLauncher:
                    bg=COLORS["primary"], fg="white",
                    relief=tk.FLAT, pady=10,
                    cursor="hand2").pack(fill=tk.X, pady=(10, 0))
+        
+    def get_all_assignments_history(self):
+        """
+        Get recent trip assignments history for dashboard.
+        Returns list with keys: soldier_id, item_name, required_qty, status, request_date
+        """
+        try:
+            result = self._execute(
+                """SELECT 
+                    truck_number AS soldier_id,
+                    item_name,
+                    requested_qty AS required_qty,
+                    status,
+                    created_at AS request_date
+                FROM trip_allocations 
+                ORDER BY created_at DESC 
+                LIMIT 50""",
+                fetch='all'
+            )
+            return result or []
+        except Exception as e:
+            print(f"[get_all_assignments_history] Error: {e}")
+            return []
 
 
 # ═══════════════════════════════════════════════════════════

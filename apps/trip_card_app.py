@@ -1,5 +1,6 @@
 # apps/trip_card_app.py
-# 🎖 TRIP CARD MANAGER - Clean Indian Army Theme
+# 🎖 TRIP CARD MANAGER - Simple Demand Card (No Warehouse Integration)
+# Unit Manager just creates demand - Gate verifies stock
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -17,13 +18,42 @@ from mifare_core import MifareCore
 from trip_card import TripCard
 
 
+# ═══════════════════════════════════════════════════════════
+# PREDEFINED ITEMS LIST (Standard military items)
+# ═══════════════════════════════════════════════════════════
+# Unit can request these items - actual availability checked at gate
+
+ITEMS_CATALOG = [
+    "AK47",
+    "Pistol",
+    "Rifle",
+    "Ammo",
+    "Grenade",
+    "Helmet",
+    "Boots",
+    "Uniform",
+    "Bullet-proof Vest",
+    "Night Vision Goggles",
+    "Medical Kit",
+    "Ration Pack",
+    "Water Bottle",
+    "Tent",
+    "Sleeping Bag",
+    "Radio",
+    "Binoculars",
+    "Knife",
+    "Flashlight",
+    "Battery"
+]
+
+
 class TripCardApp:
 
     def __init__(self, root):
         self.root = root
         self.root.title("TRIP CARD MANAGER — Indian Army")
         self.root.configure(bg=COLORS["bg"])
-        self.root.geometry("1300x800")
+        self.root.geometry("1400x800")
         self.root.minsize(1200, 700)
         try:
             self.root.state("zoomed")
@@ -36,6 +66,7 @@ class TripCardApp:
 
         self._setup_styles()
         self._build_ui()
+        self._load_items_catalog()
 
         self.mifare.find_reader()
         self._poll_card()
@@ -43,60 +74,81 @@ class TripCardApp:
     def _setup_styles(self):
         s = ttk.Style()
         s.theme_use("clam")
+        
         s.configure("Clean.Treeview",
             background="white", 
             foreground=COLORS["text"],
-            rowheight=32, 
+            rowheight=36,
             font=("Segoe UI", 10),
             fieldbackground="white",
             borderwidth=1)
+        
         s.configure("Clean.Treeview.Heading",
             background=COLORS["primary"], 
             foreground="white",
             font=("Segoe UI", 10, "bold"), 
-            padding=8,
-            relief="flat")
+            padding=10,
+            relief="flat",
+            borderwidth=0)
+        
+        s.map("Clean.Treeview.Heading",
+            background=[("active", COLORS["primary"]),
+                        ("pressed", COLORS["primary_dark"]),
+                        ("!active", COLORS["primary"])],
+            foreground=[("active", "white"),
+                        ("pressed", "white"),
+                        ("!active", "white")],
+            relief=[("active", "flat"), ("pressed", "flat")])
+        
         s.map("Clean.Treeview",
-              background=[("selected", COLORS["primary"])],
-              foreground=[("selected", "white")])
+            background=[("selected", "#FFE082")],
+            foreground=[("selected", "#1B5E20")]) 
+        
+        s.configure("TCombobox",
+            font=("Segoe UI", 11),
+            padding=6,
+            fieldbackground="white",
+            background="white",
+            arrowsize=18)
+        s.map("TCombobox",
+            fieldbackground=[("readonly", "white")],
+            foreground=[("readonly", COLORS["text"])],
+            selectbackground=[("readonly", "white")],
+            selectforeground=[("readonly", COLORS["text"])])
+        
+        self.root.option_add("*TCombobox*Listbox.font", ("Segoe UI", 11))
+        self.root.option_add("*TCombobox*Listbox.background", "white")
+        self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", COLORS["primary"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "white")
 
     # ═══════════════════════════════════════════════════════
     # MAIN UI BUILD
     # ═══════════════════════════════════════════════════════
 
     def _build_ui(self):
-        """Build complete UI."""
-        # 1. Header
         self._build_header()
-        
-        # 2. Card status bar
         self._build_card_status_bar()
         
-        # 3. Main content
         main = tk.Frame(self.root, bg=COLORS["bg"])
         main.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
         
-        # Left: Form
         left = tk.Frame(main, bg=COLORS["bg"])
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
         self._build_form(left)
         
-        # Right: Actions + Log
         right = tk.Frame(main, bg=COLORS["bg"], width=400)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(6, 0))
         right.pack_propagate(False)
         self._build_actions(right)
         
-        # 4. Footer
         self._build_footer()
 
     def _build_header(self):
-        """Clean army green header."""
         hdr = tk.Frame(self.root, bg=COLORS["primary"], height=75)
         hdr.pack(fill=tk.X)
         hdr.pack_propagate(False)
         
-        # Left: Logo + Title
         left = tk.Frame(hdr, bg=COLORS["primary"])
         left.pack(side=tk.LEFT, padx=20, pady=12)
         
@@ -118,7 +170,6 @@ class TripCardApp:
                  bg=COLORS["primary"],
                  fg="white").pack(anchor="w")
         
-        # Right: Time + Status
         right = tk.Frame(hdr, bg=COLORS["primary"])
         right.pack(side=tk.RIGHT, padx=20)
         
@@ -140,7 +191,6 @@ class TripCardApp:
         self.root.after(1000, self._update_time)
 
     def _build_card_status_bar(self):
-        """Card status indicator."""
         self.card_bar = tk.Frame(self.root, bg=COLORS["danger"], height=28)
         self.card_bar.pack(fill=tk.X)
         self.card_bar.pack_propagate(False)
@@ -163,8 +213,6 @@ class TripCardApp:
         self.atr_lbl.pack(side=tk.RIGHT, padx=16)
 
     def _build_form(self, parent):
-        """Build form - clean white panels."""
-        
         # ─── TRIP INFO ───
         trip_frame = tk.LabelFrame(parent,
             text="  TRIP INFORMATION  ",
@@ -214,7 +262,7 @@ class TripCardApp:
         self._add_field(sub_inner, 0, 0, "Sub-driver ID:", "subdriver_id")
         self._add_field(sub_inner, 0, 2, "Sub-driver Name:", "subdriver_name")
         
-        # ─── ITEMS ───
+        # ─── ITEMS REQUESTED ───
         items_frame = tk.LabelFrame(parent,
             text="  ITEMS TO TRANSPORT  ",
             font=("Segoe UI", 10, "bold"),
@@ -233,13 +281,14 @@ class TripCardApp:
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["bg_card"], fg=COLORS["text"]).pack(side=tk.LEFT, padx=(0, 5))
         
-        self.item_name_entry = tk.Entry(add_row,
+        # Simple dropdown from catalog
+        self.item_name_entry = ttk.Combobox(add_row,
             font=("Segoe UI", 11),
-            relief=tk.SOLID, bd=1, width=20,
-            highlightthickness=1,
-            highlightbackground=COLORS["input_border"],
-            highlightcolor=COLORS["primary"])
-        self.item_name_entry.pack(side=tk.LEFT, padx=(0, 10), ipady=4)
+            width=30,
+            state="readonly",
+            values=["-- Select Item --"])
+        self.item_name_entry.set("-- Select Item --")
+        self.item_name_entry.pack(side=tk.LEFT, padx=(0, 12), pady=4)
         
         tk.Label(add_row, text="Qty:",
             font=("Segoe UI", 10, "bold"),
@@ -251,13 +300,13 @@ class TripCardApp:
             highlightthickness=1,
             highlightbackground=COLORS["input_border"],
             highlightcolor=COLORS["primary"])
-        self.item_qty_entry.pack(side=tk.LEFT, padx=(0, 10), ipady=4)
+        self.item_qty_entry.pack(side=tk.LEFT, padx=(0, 12), ipady=5)
         
         tk.Button(add_row, text="+ ADD ITEM",
             command=self._add_item,
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["primary"], fg="white",
-            relief=tk.FLAT, padx=15, pady=6,
+            relief=tk.FLAT, padx=15, pady=7,
             cursor="hand2",
             activebackground=COLORS["primary_dark"],
             activeforeground="white").pack(side=tk.LEFT)
@@ -266,21 +315,22 @@ class TripCardApp:
             command=self._remove_item,
             font=("Segoe UI", 10, "bold"),
             bg=COLORS["danger"], fg="white",
-            relief=tk.FLAT, padx=15, pady=6,
+            relief=tk.FLAT, padx=15, pady=7,
             cursor="hand2").pack(side=tk.LEFT, padx=(8, 0))
         
         tk.Button(add_row, text="CLEAR ALL",
             command=self._clear_items,
             font=("Segoe UI", 9, "bold"),
             bg=COLORS["text_muted"], fg="white",
-            relief=tk.FLAT, padx=12, pady=6,
+            relief=tk.FLAT, padx=12, pady=7,
             cursor="hand2").pack(side=tk.RIGHT)
         
         # Bindings
-        self.item_name_entry.bind("<Return>", lambda e: self.item_qty_entry.focus())
+        self.item_name_entry.bind("<<ComboboxSelected>>", 
+                                    lambda e: self.item_qty_entry.focus())
         self.item_qty_entry.bind("<Return>", lambda e: self._add_item())
         
-        # Items table
+        # Items table (directly after add row - no info hint)
         tree_frame = tk.Frame(items_inner, bg=COLORS["bg_card"])
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         
@@ -288,13 +338,13 @@ class TripCardApp:
         self.items_tree = ttk.Treeview(tree_frame, columns=cols,
             show="headings", style="Clean.Treeview")
         
-        self.items_tree.heading("num", text="#")
-        self.items_tree.heading("item", text="Item Name")
-        self.items_tree.heading("qty", text="Quantity")
+        self.items_tree.heading("num", text="S.No.", anchor="center")
+        self.items_tree.heading("item", text="Item Name", anchor="center")
+        self.items_tree.heading("qty", text="Quantity", anchor="center")
         
-        self.items_tree.column("num", width=50, anchor="center")
-        self.items_tree.column("item", width=300, anchor="w")
-        self.items_tree.column("qty", width=120, anchor="center")
+        self.items_tree.column("num", width=80, anchor="center", stretch=False)
+        self.items_tree.column("item", width=400, anchor="center", stretch=True)
+        self.items_tree.column("qty", width=150, anchor="center", stretch=False)
         
         sb = ttk.Scrollbar(tree_frame, orient="vertical",
             command=self.items_tree.yview)
@@ -310,7 +360,6 @@ class TripCardApp:
         ).pack(anchor="w", padx=8, pady=(0, 8))
 
     def _add_field(self, parent, row, col, label, key):
-        """Add label + entry field."""
         tk.Label(parent, text=label,
             font=("Segoe UI", 10),
             bg=COLORS["bg_card"], fg=COLORS["text"],
@@ -328,8 +377,6 @@ class TripCardApp:
         self.fields[key] = entry
 
     def _build_actions(self, parent):
-        """Build action buttons + log."""
-        
         # ─── CARD OPERATIONS ───
         card_frame = tk.LabelFrame(parent,
             text="  CARD OPERATIONS  ",
@@ -341,15 +388,13 @@ class TripCardApp:
         inner = tk.Frame(card_frame, bg=COLORS["bg_card"])
         inner.pack(fill=tk.X, padx=2, pady=2)
         
-        # Help text
         tk.Label(inner,
             text="Fill all fields, then write to card.\n"
-                 "Or read existing card to view data.",
+                "Or read existing card to view data.",
             font=("Segoe UI", 9, "italic"),
             bg=COLORS["bg_card"], fg=COLORS["text_muted"],
             justify="left").pack(anchor="w", padx=12, pady=(10, 12))
         
-        # Write button (primary action)
         self.write_btn = tk.Button(inner,
             text="WRITE TO CARD",
             command=self._write_card,
@@ -361,7 +406,6 @@ class TripCardApp:
             activeforeground="white")
         self.write_btn.pack(fill=tk.X, padx=12, pady=(0, 8))
         
-        # Read button
         self.read_btn = tk.Button(inner,
             text="READ FROM CARD",
             command=self._read_card,
@@ -371,7 +415,6 @@ class TripCardApp:
             cursor="hand2")
         self.read_btn.pack(fill=tk.X, padx=12, pady=(0, 8))
         
-        # Clear button
         tk.Button(inner,
             text="CLEAR FORM",
             command=self._clear_form,
@@ -406,7 +449,6 @@ class TripCardApp:
         self._log("Place card on reader to begin", "info")
 
     def _build_footer(self):
-        """Simple footer."""
         footer = tk.Frame(self.root, bg=COLORS["primary"], height=26)
         footer.pack(fill=tk.X, side=tk.BOTTOM)
         footer.pack_propagate(False)
@@ -466,6 +508,17 @@ class TripCardApp:
         self.root.after(1500, self._poll_card)
 
     # ═══════════════════════════════════════════════════════
+    # ITEMS CATALOG (static list)
+    # ═══════════════════════════════════════════════════════
+
+    def _load_items_catalog(self):
+        """Load predefined items catalog (no database)."""
+        values = ["-- Select Item --"] + sorted(ITEMS_CATALOG)
+        self.item_name_entry['values'] = values
+        self.item_name_entry.set("-- Select Item --")
+        self._log(f"Loaded {len(ITEMS_CATALOG)} items in catalog", "ok")
+
+    # ═══════════════════════════════════════════════════════
     # ITEM MANAGEMENT
     # ═══════════════════════════════════════════════════════
 
@@ -473,8 +526,8 @@ class TripCardApp:
         name = self.item_name_entry.get().strip()
         qty_str = self.item_qty_entry.get().strip()
 
-        if not name:
-            messagebox.showwarning("Required", "Enter item name!")
+        if not name or name.startswith("--"):
+            messagebox.showwarning("Required", "Select an item from dropdown!")
             self.item_name_entry.focus()
             return
 
@@ -491,22 +544,25 @@ class TripCardApp:
             messagebox.showwarning("Max Items", "Maximum 36 items per card!")
             return
 
-        for item in self.items:
+        # Check if already added
+        for idx, item in enumerate(self.items):
             if item['name'].lower() == name.lower():
                 if messagebox.askyesno("Duplicate",
-                    f"'{name}' already added. Update quantity?"):
-                    item['qty'] += qty
+                    f"'{name}' already added with qty {item['qty']}.\n\n"
+                    f"Add {qty} more? (Total will be {item['qty'] + qty})"):
+                    self.items[idx]['qty'] += qty
                     self._refresh_items()
-                    self.item_name_entry.delete(0, tk.END)
-                    self.item_qty_entry.delete(0, tk.END)
-                    self.item_name_entry.focus()
+                    self._log(f"Updated: {name} → {self.items[idx]['qty']}", "ok")
+                    self._reset_item_input()
                 return
 
         self.items.append({'name': name, 'qty': qty})
         self._refresh_items()
         self._log(f"Added: {name} × {qty}", "ok")
+        self._reset_item_input()
 
-        self.item_name_entry.delete(0, tk.END)
+    def _reset_item_input(self):
+        self.item_name_entry.set("-- Select Item --")
         self.item_qty_entry.delete(0, tk.END)
         self.item_name_entry.focus()
 
@@ -594,7 +650,6 @@ class TripCardApp:
 
             self._log(f"Truck: {truck}", "ok")
             self._log(f"Driver: {driver_name} ({driver_id})", "ok")
-            self._log(f"Sub-driver: {subdriver_name}", "ok")
             self._log(f"Items: {len(self.items)}", "ok")
             self._log("CARD WRITTEN SUCCESSFULLY!", "ok")
 
@@ -603,10 +658,11 @@ class TripCardApp:
             info += f"Truck Number:  {truck}\n"
             info += f"Driver:        {driver_name}\n"
             info += f"Driver ID:     {driver_id}\n"
-            info += f"Sub-driver:    {subdriver_name or '(empty)'}\n"
-            info += f"Items: {len(self.items)}\n"
+            info += f"Sub-driver:    {subdriver_name or '(empty)'}\n\n"
+            info += f"📦 Items Requested: {len(self.items)}\n"
             for item in self.items:
                 info += f"  • {item['name']} × {item['qty']}\n"
+            info += f"\n➡️ Driver can now take card to warehouse gate."
 
             messagebox.showinfo("Success", info)
 
@@ -673,7 +729,7 @@ class TripCardApp:
         for entry in self.fields.values():
             entry.delete(0, tk.END)
         
-        self.item_name_entry.delete(0, tk.END)
+        self.item_name_entry.set("-- Select Item --")
         self.item_qty_entry.delete(0, tk.END)
         
         self.items = []

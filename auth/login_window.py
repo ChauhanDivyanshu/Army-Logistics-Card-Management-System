@@ -363,34 +363,34 @@ class LoginWindow:
         password = self.password_var.get()
 
         if not username:
-            self._set_status("⚠  Please enter username")
+            self._set_status("  Please enter username")
             self.username_entry.focus()
             return
 
         if not password:
-            self._set_status("⚠  Please enter password")
+            self._set_status("  Please enter password")
             self.password_entry.focus()
             return
 
         self.login_btn.configure(state=tk.DISABLED,
-                                  text="🔄  Authenticating...")
+                                  text="  Authenticating...")
         self.root.update()
 
         db_ok, db_msg = self.db.test_connection()
         if not db_ok:
-            self._set_status(f"❌  Database error: {db_msg[:40]}")
+            self._set_status(f"  Database error: {db_msg[:40]}")
             self.login_btn.configure(state=tk.NORMAL, text="🔓  SIGN IN")
             return
 
         user_check = self.db.get_user_by_username(username)
         if not user_check:
-            self._set_status("❌  Invalid username or password")
+            self._set_status("  Invalid username or password")
             self.db.log_login_attempt(None, username, False, "User not found")
             self.login_btn.configure(state=tk.NORMAL, text="🔓  SIGN IN")
             return
 
         if user_check["status"] == "LOCKED":
-            self._set_status("🔒  Account locked. Contact administrator.")
+            self._set_status("  Account locked. Contact administrator.")
             self.db.log_login_attempt(
                 user_check["user_id"], username, False, "Account locked"
             )
@@ -398,7 +398,7 @@ class LoginWindow:
             return
 
         if user_check["status"] == "INACTIVE":
-            self._set_status("⚠  Account inactive. Contact administrator.")
+            self._set_status("  Account inactive. Contact administrator.")
             self.login_btn.configure(state=tk.NORMAL, text="🔓  SIGN IN")
             return
 
@@ -406,7 +406,7 @@ class LoginWindow:
         user_data = self.db.authenticate_user(username, password_hash)
 
         if user_data:
-            self._set_status("✓  Login successful! Loading...", is_error=False)
+            self._set_status("  Login successful! Loading...", is_error=False)
             self.root.update()
 
             self.db.update_last_login(user_data["user_id"])
@@ -425,14 +425,14 @@ class LoginWindow:
             remaining = 5 - (user_check["failed_attempts"] + 1)
             if remaining > 0:
                 self._set_status(
-                    f"❌  Invalid password. {remaining} attempts remaining."
+                    f"  Invalid password. {remaining} attempts remaining."
                 )
             else:
-                self._set_status("🔒  Account locked due to multiple failures.")
+                self._set_status("  Account locked due to multiple failures.")
 
             self.password_var.set("")
             self.password_entry.focus()
-            self.login_btn.configure(state=tk.NORMAL, text="🔓  SIGN IN")
+            self.login_btn.configure(state=tk.NORMAL, text="  SIGN IN")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -460,15 +460,15 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 60)
     if success:
-        print("  ✅ LOGIN SUCCESSFUL")
+        print("   LOGIN SUCCESSFUL")
         print("=" * 60)
-        print(f"  👤 User:       {Session.get_full_name()}")
-        print(f"  🆔 Username:   {Session.get_username()}")
-        print(f"  🎭 Role:       {Session.get_role()}")
-        print(f"  📧 Email:      {Session.get_email()}")
-        print(f"  🕐 Login Time: {Session.get_login_time()}")
-        print(f"  ℹ️  Display:    {Session.get_display_info()}")
+        print(f"   User:       {Session.get_full_name()}")
+        print(f"   Username:   {Session.get_username()}")
+        print(f"   Role:       {Session.get_role()}")
+        print(f"   Email:      {Session.get_email()}")
+        print(f"   Login Time: {Session.get_login_time()}")
+        print(f"   Display:    {Session.get_display_info()}")
         print("=" * 60)
     else:
-        print("  ❌ LOGIN CANCELLED OR FAILED")
+        print("   LOGIN CANCELLED OR FAILED")
         print("=" * 60)

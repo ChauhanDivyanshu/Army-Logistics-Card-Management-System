@@ -51,14 +51,14 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # Test hashing
-    print("\n📝 Password Hashing Test:")
+    print("\n Password Hashing Test:")
     test_passwords = ["admin123", "password123", "test@1234"]
     for pwd in test_passwords:
         hashed = hash_password(pwd)
         print(f"   '{pwd}' → {hashed}")
 
     # Test verification
-    print("\n📝 Password Verification Test:")
+    print("\n Password Verification Test:")
     pwd = "admin123"
     hashed = hash_password(pwd)
     print(f"   Original:  {pwd}")
@@ -67,5 +67,5 @@ if __name__ == "__main__":
     print(f"   Verify NO: {verify_password('wrongpass', hashed)}")
 
     print("\n" + "=" * 60)
-    print("  ✅ AUTH HELPER TESTS COMPLETED")
+    print("  AUTH HELPER TESTS COMPLETED")
     print("=" * 60)

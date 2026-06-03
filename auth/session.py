@@ -178,11 +178,11 @@ if __name__ == "__main__":
     print(f"   Display:   {Session.get_display_info()}")
 
     # Test 3: Logout
-    print("\n🚪 TEST 3: Logout")
+    print("\n TEST 3: Logout")
     Session.logout()
     print(f"   Logged in: {Session.is_logged_in()}")
     print(f"   Display:   {Session.get_display_info()}")
 
     print("\n" + "=" * 60)
-    print("  ✅ SESSION TESTS PASSED!")
+    print("  SESSION TESTS PASSED!")
     print("=" * 60)

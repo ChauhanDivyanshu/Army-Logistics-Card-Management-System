@@ -41,8 +41,8 @@ SIMULATION_MODE = True
 AUTO_GENERATE_UHF_PREFIX = "DEMO-EPC"  # Will generate like "DEMO-EPC-000001"
 
 if SIMULATION_MODE:
-    print("⚠️ WARNING: Running in DEMO MODE")
+    print(" WARNING: Running in DEMO MODE")
     print("   (No real UHF reader connected)")
     print("   Using simulated UHF data...")
 else:
-    print("✅ PRODUCTION MODE (Real UHF enabled)")
+    print(" PRODUCTION MODE (Real UHF enabled)")

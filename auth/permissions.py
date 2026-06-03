@@ -140,7 +140,7 @@ def require_role(allowed_roles, parent_window=None):
         roles_str = ", ".join(allowed_roles)
         _show_error(
             "Access Denied",
-            f"❌ This feature requires one of these roles:\n\n"
+            f" This feature requires one of these roles:\n\n"
             f"{roles_str}\n\n"
             f"Your role: {current_role}",
             parent_window
@@ -160,7 +160,7 @@ def _show_error(title, message, parent=None):
         from tkinter import messagebox
         messagebox.showerror(title, message, parent=parent)
     except Exception:
-        print(f"❌ {title}: {message}")
+        print(f" {title}: {message}")
 
 
 def get_module_label(module_name):
@@ -180,17 +180,17 @@ if __name__ == "__main__":
     test_roles = ["ADMIN", "GATE", "UNIT", "WAREHOUSE"]
 
     for role in test_roles:
-        print(f"\n🎭 ROLE: {role}")
+        print(f"\n ROLE: {role}")
         print("─" * 50)
 
         allowed = get_allowed_modules(role)
         denied  = get_denied_modules(role)
 
-        print(f"  ✅ ALLOWED ({len(allowed)} modules):")
+        print(f"   ALLOWED ({len(allowed)} modules):")
         for m in allowed:
             print(f"     • {MODULE_NAMES.get(m, m)}")
 
-        print(f"  ❌ DENIED ({len(denied)} modules):")
+        print(f"   DENIED ({len(denied)} modules):")
         for m in denied:
             print(f"     • {MODULE_NAMES.get(m, m)}")
 
@@ -214,5 +214,5 @@ if __name__ == "__main__":
         print(f"  {icon} {role:10} → {module:18} = {result}")
 
     print("\n" + "=" * 60)
-    print("  ✅ PERMISSION TESTS COMPLETED")
+    print("   PERMISSION TESTS COMPLETED")
     print("=" * 60)

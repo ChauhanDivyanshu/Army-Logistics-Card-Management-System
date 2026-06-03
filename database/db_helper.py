@@ -231,7 +231,7 @@ class DatabaseHelper:
             FROM sheds s
             LEFT JOIN warehouse w ON s.warehouse_id = w.warehouse_id
             WHERE s.shed_id = %s""",
-            (str(shed_id),),  # ✅ Always convert to string
+            (str(shed_id),),  
             fetch='one'
         )
 

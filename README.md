@@ -1,19 +1,62 @@
-# 🎖 Army Logistics Card Management System
+﻿# 🎖️ Indian Army Logistics System
 
-A complete logistics management system for the Indian Army using **MIFARE Classic 1K** cards and **PostgreSQL** database.
+A comprehensive military logistics management system with multi-tier architecture.
 
-![Status](https://img.shields.io/badge/Status-Complete-success)
-![Python](https://img.shields.io/badge/Python-3.8+-blue)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-12+-blue)
-![License](https://img.shields.io/badge/License-MIT-green)
+## Features
+- Multi-role authentication (Admin, Gate, Unit, Warehouse)
+- MIFARE NFC card integration
+- UHF RFID bulk scanning
+- Real-time inventory tracking
+- REST API with WebSocket support
+- Role-based access control
 
-## 📋 Features
+## Tech Stack
+- Python 3.10+
+- PostgreSQL 18
+- Flask + Flask-SocketIO
+- Tkinter (GUI)
+- pyscard (MIFARE)
 
-- ✅ **5 Independent Applications** with launcher
-- ✅ **PostgreSQL Database** integration
-- ✅ **MIFARE Card Read/Write** support
-- ✅ **Auto Warehouse Assignment** logic
-- ✅ **Real-time Card Detection**
-- ✅ **Professional Army-themed UI**
-- ✅ **Gate Verification System**
-- ✅ **Printable Assignment Slips**
+## Setup
+
+### 1. Install Dependencies
+\\\ash
+pip install -r requirements.txt
+\\\
+
+### 2. Configure Database
+\\\ash
+# Copy example config
+cp database/db_config.example.py database/db_config.py
+
+# Edit and add your PostgreSQL credentials
+\\\
+
+### 3. Setup Database
+\\\ash
+# Create database in PostgreSQL
+# Run the SQL setup script (see docs)
+\\\
+
+### 4. Run
+\\\ash
+# Start API server
+python api_server.py
+
+# In another terminal, start main app
+python main.py
+\\\
+
+## Demo Credentials
+- Admin: \dmin / admin123\
+- Gate: \gate1 / password123\
+- Unit: \unit1 / password123\
+- Warehouse: \warehouse1 / password123\
+
+## Build .exe
+\\\ash
+# See build instructions in docs
+\\\
+
+## License
+© 2025 Indian Army
